@@ -1,4 +1,4 @@
-import type { AppConfig, SenateRun } from "./types";
+import type { AppConfig, CouncilRun, SenateRun } from "./types";
 
 export async function getConfig(): Promise<AppConfig> {
   const response = await fetch("/api/config");
@@ -27,6 +27,35 @@ export async function runSenate(payload: {
     const error = await response.json().catch(() => ({ detail: "Senate run failed" }));
     throw new Error(error.detail || "Senate run failed");
   }
+  return response.json();
+}
+
+export async function startCouncil(payload: {
+  prompt: string;
+  selected_model_ids: string[];
+  system_context?: string;
+}): Promise<{ run_id: string }> {
+  const response = await fetch("/api/council/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: "Council run failed" }));
+    throw new Error(error.detail || "Council run failed");
+  }
+  return response.json();
+}
+
+export async function getCouncilRun(runId: string): Promise<CouncilRun> {
+  const response = await fetch(`/api/council/run/${runId}`);
+  if (!response.ok) throw new Error("Failed to load council run");
+  return response.json();
+}
+
+export async function getCouncilRuns(): Promise<CouncilRun[]> {
+  const response = await fetch("/api/council/runs");
+  if (!response.ok) throw new Error("Failed to load council runs");
   return response.json();
 }
 

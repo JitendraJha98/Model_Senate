@@ -14,7 +14,8 @@ Use it for investment research, complex decisions, creative brainstorming, and v
 
 1. **First opinions**: each selected model answers independently.
 2. **Anonymous review**: each model reviews and ranks the other answers without seeing model/provider names.
-3. **Leader synthesis**: the chosen leader model combines the opinions and reviews into one final answer.
+3. **Aggregate scoring**: Model_Senate parses the `FINAL RANKING` sections and computes average rank, first-place votes, and confidence score.
+4. **Leader synthesis**: the chosen leader model combines the opinions, reviews, and aggregate ranking into one final answer.
 
 ## Tech Stack
 
@@ -80,6 +81,8 @@ npm run dev
 
 Open http://localhost:5173.
 
+The backend defaults to http://127.0.0.1:8001 so it does not collide with other local apps on port 8000.
+
 ## Model Configuration
 
 Default routes live in `backend/config.py`. You can also provide custom routes with `MODEL_SENATE_ROUTES` as JSON:
@@ -107,6 +110,8 @@ The UI shows which routes are missing local API keys without revealing the key v
 - `GET /api/conversations`
 - `GET /api/conversations/{run_id}`
 
+`POST /api/senate/run` returns first opinions, raw peer reviews, parsed rankings, aggregate rankings, final synthesis, timing, token metadata where available, and non-secret error details.
+
 ## Testing
 
 ```bash
@@ -119,6 +124,10 @@ npm run build
 ## Privacy
 
 Model_Senate is local-first. Prompts and responses are stored in `data/conversations/` as JSON. API keys stay in `.env` or process environment variables and are never written to conversation files.
+
+## Architecture Notes
+
+See `docs/architecture.md` for the pipeline contract, reliability rules, storage shape, and adapter strategy.
 
 ## Limitations
 

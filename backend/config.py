@@ -21,9 +21,20 @@ class Settings(BaseSettings):
     xai_api_key: str | None = None
     frontend_origin: str = "http://localhost:5173"
     model_senate_host: str = "127.0.0.1"
-    model_senate_port: int = 8000
+    model_senate_port: int = 8001
     data_dir: Path = Path("data/conversations")
     model_senate_routes: str | None = None
+    tool_web_search_enabled: bool = False
+    tool_web_search_provider: str = "tavily"
+    tavily_api_key: str | None = None
+    serper_api_key: str | None = None
+    brave_search_api_key: str | None = None
+    tool_code_executor_enabled: bool = False
+    tool_code_executor_timeout_seconds: int = 10
+    orchestrator_model_id: str = "openrouter-gpt-5-2"
+    orchestrator_provider: ProviderName = "openrouter"
+    council_min_models: int = 2
+    council_synthesis_retry_on_failure: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -105,4 +116,3 @@ def load_model_routes(settings: Settings) -> list[ModelRoute]:
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

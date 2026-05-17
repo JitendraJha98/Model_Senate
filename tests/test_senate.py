@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from backend.schemas import ChatMessage, ModelRoute, SenateRequest, UsageMetadata
-from backend.senate import SenateService, build_review_prompt
+from backend.senate import SenateService, build_review_prompt, calculate_aggregate_rankings, parse_ranking_from_text
 from backend.storage import ConversationStore
 
 
@@ -39,6 +39,54 @@ def test_review_prompt_anonymizes_model_names():
     assert "Other Model" not in prompt
 
 
+def test_parse_ranking_from_final_section():
+    model_outputs = [
+        type("Opinion", (), {"model_id": "m1", "display_name": "Model One", "content": "Alpha"})(),
+        type("Opinion", (), {"model_id": "m2", "display_name": "Model Two", "content": "Beta"})(),
+    ]
+    ranking = parse_ranking_from_text(
+        "Evaluation text\n\nFINAL RANKING:\n1. Response B - more complete\n2. Response A - concise",
+        {"Response A": "m1", "Response B": "m2"},
+        model_outputs,
+    )
+    assert [entry.model_id for entry in ranking] == ["m2", "m1"]
+    assert ranking[0].reason == "more complete"
+
+
+def test_calculate_aggregate_rankings():
+    model_outputs = [
+        type("Opinion", (), {"model_id": "m1", "display_name": "Model One", "content": "Alpha"})(),
+        type("Opinion", (), {"model_id": "m2", "display_name": "Model Two", "content": "Beta"})(),
+    ]
+    reviews = [
+        type(
+            "Review",
+            (),
+            {
+                "status": "completed",
+                "parsed_ranking": [
+                    type("Entry", (), {"model_id": "m2", "rank": 1})(),
+                    type("Entry", (), {"model_id": "m1", "rank": 2})(),
+                ],
+            },
+        )(),
+        type(
+            "Review",
+            (),
+            {
+                "status": "completed",
+                "parsed_ranking": [
+                    type("Entry", (), {"model_id": "m2", "rank": 1})(),
+                    type("Entry", (), {"model_id": "m1", "rank": 2})(),
+                ],
+            },
+        )(),
+    ]
+    aggregate = calculate_aggregate_rankings(reviews, model_outputs)
+    assert aggregate[0].model_id == "m2"
+    assert aggregate[0].first_place_votes == 2
+
+
 @pytest.mark.asyncio
 async def test_pipeline_records_partial_failures(tmp_path: Path):
     fake = FakeAdapter(fail_model="m2")
@@ -51,4 +99,3 @@ async def test_pipeline_records_partial_failures(tmp_path: Path):
     assert any(output.status == "failed" for output in run.first_opinions)
     saved = (tmp_path / f"{run.id}.json").read_text(encoding="utf-8")
     assert "sk-" not in saved
-

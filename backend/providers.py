@@ -41,7 +41,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "http://localhost:5173",
-            "X-Title": self.app_title,
+            "X-OpenRouter-Title": self.app_title,
         }
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
@@ -129,4 +129,3 @@ def _usage_from_openai_compatible(usage: dict[str, Any] | None) -> UsageMetadata
         total_tokens=usage.get("total_tokens"),
         cost=usage.get("cost"),
     )
-
