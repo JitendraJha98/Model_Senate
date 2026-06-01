@@ -468,13 +468,19 @@ function CouncilResults({ run }: { run: CouncilRun }) {
         <div className="panel-heading">
           <h2>Model Council synthesis</h2>
           <p>
-            {run.synthesis?.leader_display_name ?? "No leader"} - {run.confidence_grade ?? "ungraded"} - {run.total_latency_ms} ms
+            {run.synthesis?.leader_display_name ?? "No leader"} -{" "}
+            {run.confidence_grade ?? "ungraded"} - {run.total_latency_ms} ms
           </p>
         </div>
         {run.synthesis?.status === "completed" ? (
           <>
             <ReactMarkdown>{run.synthesis.direct_answer}</ReactMarkdown>
-            {run.validation && <p className="muted">Validation: {run.validation.status.replace(/_/g, " ")}</p>}
+            {run.validation && (
+              <p className="muted">
+                Validation: {run.validation.verdict ?? run.validation.status}
+                {run.validation.addendum && ` — ${run.validation.addendum}`}
+              </p>
+            )}
           </>
         ) : (
           <div className="error">{run.synthesis?.error ?? "Synthesis failed"}</div>
@@ -484,12 +490,12 @@ function CouncilResults({ run }: { run: CouncilRun }) {
       <article className="panel">
         <div className="panel-heading">
           <h2>Orchestration</h2>
-          <p>{run.orchestration_plan.query_type} - {run.orchestration_plan.orchestration_status}</p>
+          <p>{run.orchestration_plan.query_type} — {run.orchestration_plan.orchestration_status}</p>
         </div>
         <div className="wide-list">
           {Object.entries(run.orchestration_plan.role_assignments).map(([modelId, role]) => (
             <div className="ranking-row" key={modelId}>
-              <span>{run.selected_models.find((model) => model.id === modelId)?.display_name ?? modelId}</span>
+              <span>{run.selected_models.find((m) => m.id === modelId)?.display_name ?? modelId}</span>
               <b>{role}</b>
             </div>
           ))}
@@ -503,18 +509,33 @@ function CouncilResults({ run }: { run: CouncilRun }) {
             <p>{run.leader_election.rationale}</p>
           </div>
           <div className="ranking-grid">
-            {run.leader_election.candidates.map((candidate, index) => (
-              <div className="ranking-card" key={candidate.model_id}>
-                <div className="rank-number">{index + 1}</div>
-                <div>
-                  <strong>{candidate.display_name}</strong>
-                  <div className="rank-meter" aria-label={`Election score ${Math.round(candidate.score * 100)} percent`}>
-                    <span style={{ width: `${Math.round(candidate.score * 100)}%` }} />
+            {Object.entries(run.leader_election.all_scores)
+              .sort(([, a], [, b]) => b - a)
+              .map(([modelId, score], index) => {
+                const breakdown = run.leader_election!.score_breakdown[modelId];
+                const displayName =
+                  run.selected_models.find((m) => m.id === modelId)?.display_name ?? modelId;
+                const isElected = modelId === run.leader_election!.elected_model_id;
+                return (
+                  <div className="ranking-card" key={modelId}>
+                    <div className="rank-number">{index + 1}{isElected ? " ★" : ""}</div>
+                    <div>
+                      <strong>{displayName}</strong>
+                      <div
+                        className="rank-meter"
+                        aria-label={`Election score ${Math.round(score * 100)} percent`}
+                      >
+                        <span style={{ width: `${Math.round(score * 100)}%` }} />
+                      </div>
+                      <small>
+                        score {score.toFixed(3)} | rank {breakdown?.rank_score?.toFixed(2)} |
+                        calib {breakdown?.calibration_score?.toFixed(2)} |
+                        tool {breakdown?.tool_verification_ratio?.toFixed(2)}
+                      </small>
+                    </div>
                   </div>
-                  <small>score {candidate.score}</small>
-                </div>
-              </div>
-            ))}
+                );
+              })}
           </div>
         </article>
       )}
@@ -528,8 +549,21 @@ function CouncilResults({ run }: { run: CouncilRun }) {
           <div className="review-list">
             {run.agent_opinions.map((opinion) => (
               <div className="review" key={opinion.model_id}>
-                <h3>{opinion.display_name} - {opinion.role}</h3>
-                {opinion.status === "failed" ? <div className="error">{opinion.error}</div> : <ReactMarkdown>{opinion.answer}</ReactMarkdown>}
+                <h3>
+                  {opinion.display_name} — {opinion.role}
+                  {opinion.confidence != null && (
+                    <small> (confidence: {Math.round(opinion.confidence * 100)}%)</small>
+                  )}
+                </h3>
+                {opinion.status === "failed" ? (
+                  <div className="error">{opinion.error}</div>
+                ) : (
+                  <ReactMarkdown>
+                    {opinion.answer_summary
+                      ? `**Summary:** ${opinion.answer_summary}\n\n${opinion.content}`
+                      : opinion.content}
+                  </ReactMarkdown>
+                )}
               </div>
             ))}
           </div>
@@ -537,18 +571,58 @@ function CouncilResults({ run }: { run: CouncilRun }) {
         <article className="panel">
           <div className="panel-heading">
             <h2>Critique matrix</h2>
-            <p>Reviewer to target scores.</p>
+            <p>Reviewer → target scores (factual accuracy).</p>
           </div>
           <div className="review-list">
-            {run.council_critiques.map((critique) => (
-              <div className="ranking-row" key={`${critique.reviewer_model_id}-${critique.target_model_id}`}>
-                <span>{critique.reviewer_display_name} -> {critique.target_display_name}</span>
-                <b>{critique.scores ? Math.round(((critique.scores.accuracy + critique.scores.logic + critique.scores.completeness + critique.scores.calibration) / 4) * 100) : "n/a"}</b>
-              </div>
-            ))}
+            {run.council_critiques.map((critique) => {
+              const avg =
+                critique.factual_accuracy_score != null &&
+                critique.logical_validity_score != null &&
+                critique.completeness_score != null &&
+                critique.calibration_score != null
+                  ? Math.round(
+                      ((critique.factual_accuracy_score +
+                        critique.logical_validity_score +
+                        critique.completeness_score +
+                        critique.calibration_score) /
+                        4) *
+                        100
+                    )
+                  : null;
+              return (
+                <div
+                  className="ranking-row"
+                  key={`${critique.reviewer_model_id}-${critique.target_model_id}`}
+                >
+                  <span>
+                    {critique.reviewer_display_name} [{critique.reviewer_critique_role}] →{" "}
+                    {critique.target_display_name}
+                  </span>
+                  <b>{avg != null ? `${avg}%` : "n/a"}{critique.overall_rank != null ? ` rank ${critique.overall_rank}` : ""}</b>
+                </div>
+              );
+            })}
           </div>
         </article>
       </div>
+
+      {run.synthesis?.consensus_points && run.synthesis.consensus_points.length > 0 && (
+        <article className="panel">
+          <div className="panel-heading">
+            <h2>Consensus &amp; Dissent</h2>
+          </div>
+          <div className="detail-grid">
+            <div>
+              <h4>Consensus</h4>
+              <ul>{run.synthesis.consensus_points.map((p, i) => <li key={i}>{p}</li>)}</ul>
+            </div>
+            <div>
+              <h4>Dissent</h4>
+              <ul>{run.synthesis.dissent_points.map((p, i) => <li key={i}>{p}</li>)}</ul>
+            </div>
+          </div>
+        </article>
+      )}
     </section>
   );
 }
