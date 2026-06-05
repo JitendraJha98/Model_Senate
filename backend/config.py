@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     orchestrator_provider: ProviderName = "openrouter"
     council_min_models: int = 2
     council_synthesis_retry_on_failure: bool = True
+    provider_timeout_seconds: float = 90.0
+    provider_max_retries: int = 2
+    max_concurrent_requests: int = 8
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

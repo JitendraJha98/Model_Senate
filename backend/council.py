@@ -134,6 +134,12 @@ class CouncilService:
             prompt=request.prompt,
             selected_models=selected,
             total_latency_ms=int((time.perf_counter() - started) * 1000),
+            total_tokens=sum(r.total_tokens for r in sub_runs),
+            total_cost_usd=(
+                round(sum(r.total_cost_usd for r in sub_runs if r.total_cost_usd), 6)
+                if any(r.total_cost_usd for r in sub_runs)
+                else None
+            ),
             metadata={"pipeline": "model-council", "mode": "multi_part"},
         )
 
@@ -245,7 +251,8 @@ class CouncilService:
             selected_models=selected,
             errors=[e for e in errors if e],
             total_latency_ms=int((time.perf_counter() - started) * 1000),
-            total_tokens=sum((o.usage.total_tokens or 0) for o in opinions if o.usage),
+            total_tokens=sum((o.usage.total_tokens or 0) for o in [*opinions, synthesis] if o.usage),
+            total_cost_usd=_sum_cost([*opinions, synthesis]),
             metadata={"pipeline": "model-council", "successful_first_opinions": len(successful)},
         )
 
@@ -280,6 +287,7 @@ class CouncilService:
                 plan.tool_assignments.get(route.id, []),
                 plan,
                 request,
+                stream,
             )
             await self._emit(stream, "agent_opinion", opinion.model_dump())
             return opinion
@@ -293,17 +301,24 @@ class CouncilService:
         tools: list[str],
         plan: OrchestrationPlan,
         request: CouncilRequest,
+        stream: CouncilEventStream | None = None,
     ) -> AgentOpinion:
         system = build_system_prompt(role, plan.query_type)
         if request.system_context:
             system = f"{system}\n\nUser-provided context:\n{request.system_context}"
+        adapter = self.adapters[route.provider]
+        messages = [
+            ChatMessage(role="system", content=system),
+            ChatMessage(role="user", content=request.prompt),
+        ]
+
+        async def on_delta(delta: str) -> None:
+            await self._emit(stream, "opinion_token", {"model_id": route.id, "delta": delta})
+
+        use_stream = stream is not None and route.supports_streaming
         try:
-            content, usage, latency_ms = await self.adapters[route.provider].complete(
-                route,
-                [
-                    ChatMessage(role="system", content=system),
-                    ChatMessage(role="user", content=request.prompt),
-                ],
+            content, usage, latency_ms = await self._complete(
+                adapter, route, messages, on_delta if use_stream else None
             )
             allowed = {name: self.tool_registry[name] for name in tools if name in self.tool_registry}
             content_with_tools, tool_results = await inject_tool_results(content, allowed)
@@ -547,6 +562,18 @@ class CouncilService:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
+
+    async def _complete(self, adapter, route, messages, on_delta=None):
+        """Stream token deltas when requested and supported; otherwise a single response.
+
+        A streaming failure falls back to the retry-backed `complete()` path.
+        """
+        if on_delta is not None and hasattr(adapter, "complete_streamed"):
+            try:
+                return await adapter.complete_streamed(route, messages, on_delta)
+            except Exception:
+                pass
+        return await adapter.complete(route, messages)
 
     def _route_or_raise(self, model_id: str) -> ModelRoute:
         route = self.routes.get(model_id)
@@ -818,3 +845,12 @@ def _extract_json(content: str) -> str:
     if not match:
         raise ValueError("No JSON object found")
     return match.group(0)
+
+
+def _sum_cost(items: list) -> float | None:
+    costs = [
+        item.usage.cost
+        for item in items
+        if getattr(item, "usage", None) and item.usage and item.usage.cost is not None
+    ]
+    return round(sum(costs), 6) if costs else None

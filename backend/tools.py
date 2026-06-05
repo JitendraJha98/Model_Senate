@@ -90,16 +90,76 @@ class CodeExecutorTool(Tool):
 
 class WebSearchTool(Tool):
     name = "web_search"
-    description = "Searches the web for information."
+    description = "Searches the web for information and returns the top results."
+
+    def __init__(self, provider: str = "tavily", api_key: str | None = None, max_results: int = 5):
+        self.provider = provider
+        self.api_key = api_key
+        self.max_results = max_results
 
     async def run(self, params: dict[str, Any]) -> ToolResult:
-        return ToolResult(
-            tool=self.name,
-            params=params,
-            result="",
-            success=False,
-            error="Web search tool is configured but no provider adapter is implemented yet.",
-        )
+        query = str(params.get("query") or params.get("expression") or "").strip()
+        started = time.perf_counter()
+        if not query:
+            return ToolResult(tool=self.name, params=params, result="", success=False, error="Empty search query")
+        if not self.api_key:
+            return ToolResult(
+                tool=self.name,
+                params=params,
+                result="",
+                success=False,
+                error=f"Web search provider '{self.provider}' has no API key configured.",
+            )
+        try:
+            results = await self._search(query)
+            summary = "\n".join(f"- {title}: {snippet} ({url})" for title, snippet, url in results) or "No results."
+            return ToolResult(
+                tool=self.name,
+                params=params,
+                result=summary,
+                success=True,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            return ToolResult(tool=self.name, params=params, result="", success=False, error=str(exc))
+
+    async def _search(self, query: str) -> list[tuple[str, str, str]]:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            if self.provider == "tavily":
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={"api_key": self.api_key, "query": query, "max_results": self.max_results},
+                )
+                resp.raise_for_status()
+                return [
+                    (r.get("title", ""), r.get("content", "")[:300], r.get("url", ""))
+                    for r in resp.json().get("results", [])[: self.max_results]
+                ]
+            if self.provider == "serper":
+                resp = await client.post(
+                    "https://google.serper.dev/search",
+                    headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
+                    json={"q": query, "num": self.max_results},
+                )
+                resp.raise_for_status()
+                return [
+                    (r.get("title", ""), r.get("snippet", "")[:300], r.get("link", ""))
+                    for r in resp.json().get("organic", [])[: self.max_results]
+                ]
+            if self.provider == "brave":
+                resp = await client.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    headers={"X-Subscription-Token": self.api_key, "Accept": "application/json"},
+                    params={"q": query, "count": self.max_results},
+                )
+                resp.raise_for_status()
+                return [
+                    (r.get("title", ""), r.get("description", "")[:300], r.get("url", ""))
+                    for r in resp.json().get("web", {}).get("results", [])[: self.max_results]
+                ]
+        raise ValueError(f"Unknown web search provider: {self.provider}")
 
 
 ToolRegistry = dict[str, Tool]
@@ -110,7 +170,13 @@ def build_tool_registry(settings: Any) -> ToolRegistry:
     if getattr(settings, "tool_code_executor_enabled", False):
         registry["code_executor"] = CodeExecutorTool(getattr(settings, "tool_code_executor_timeout_seconds", 10))
     if getattr(settings, "tool_web_search_enabled", False):
-        registry["web_search"] = WebSearchTool()
+        provider = getattr(settings, "tool_web_search_provider", "tavily")
+        key = {
+            "tavily": getattr(settings, "tavily_api_key", None),
+            "serper": getattr(settings, "serper_api_key", None),
+            "brave": getattr(settings, "brave_search_api_key", None),
+        }.get(provider)
+        registry["web_search"] = WebSearchTool(provider=provider, api_key=key)
     return registry
 
 

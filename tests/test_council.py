@@ -105,6 +105,64 @@ async def test_council_pipeline_stage_opinions_structured(tmp_path: Path):
     assert any(o.structured_output_parsed for o in run.agent_opinions)
 
 
+MULTI_PART_PLAN = (
+    '{"query_type":"multi_part","is_multi_part":true,'
+    '"sub_questions":[{"question":"Part one?","query_type":"factual"},'
+    '{"question":"Part two?","query_type":"analytical"}],'
+    '"role_assignments":{"m1":"Independent Expert","m2":"Devil\'s Advocate"},'
+    '"tool_assignments":{"m1":[],"m2":[]},"decomposition_rationale":"two distinct questions"}'
+)
+
+REINTEGRATION_RESPONSE = (
+    '{"unified_answer":"Combined final answer","contradictions_resolved":[],'
+    '"contradictions_unresolved":[],"final_confidence_grade":"B"}'
+)
+
+
+class MultiPartAdapter:
+    """Returns a multi-part plan first, then behaves like the single-pipeline FakeAdapter."""
+
+    def __init__(self):
+        self._plan_served = False
+
+    async def complete(self, route: ModelRoute, messages: list[ChatMessage]):
+        system = messages[0].content if messages else ""
+        if "orchestration agent" in system:
+            if not self._plan_served:
+                self._plan_served = True
+                return MULTI_PART_PLAN, UsageMetadata(total_tokens=10), 5
+            return ORCHESTRATOR_PLAN, UsageMetadata(total_tokens=10), 5
+        if "Re-integration Agent" in system:
+            return REINTEGRATION_RESPONSE, UsageMetadata(total_tokens=10), 5
+        if "critique agent" in system:
+            return CRITIQUE_RESPONSE, UsageMetadata(total_tokens=10), 5
+        if "elected Synthesizer" in system:
+            return SYNTHESIS_RESPONSE, UsageMetadata(total_tokens=10), 5
+        if "validate Model Council" in system:
+            return VALIDATION_RESPONSE, UsageMetadata(total_tokens=10), 5
+        return STAGE1_RESPONSE, UsageMetadata(total_tokens=10), 5
+
+
+@pytest.mark.asyncio
+async def test_council_multi_part_reintegrates_sub_runs(tmp_path: Path):
+    service = CouncilService(
+        routes=routes(),
+        adapters={"openrouter": MultiPartAdapter()},
+        store=ConversationStore(tmp_path),
+        tool_registry={},
+        orchestrator_model_id="m1",
+    )
+
+    run = await service.run(CouncilRequest(prompt="Part one? Part two?", selected_model_ids=["m1", "m2"]))
+
+    assert run.metadata["mode"] == "multi_part"
+    assert len(run.sub_runs) == 2
+    assert run.reintegration is not None
+    assert run.reintegration.unified_answer == "Combined final answer"
+    assert run.synthesis is None
+    assert (tmp_path / f"{run.id}.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_council_all_stage1_fail_returns_failed_run(tmp_path: Path):
     class AlwaysFailAdapter:

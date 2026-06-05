@@ -108,6 +108,8 @@ class SenateRun(BaseModel):
     final_synthesis: FinalSynthesis
     errors: list[str] = Field(default_factory=list)
     total_latency_ms: int
+    total_tokens: int = 0
+    total_cost_usd: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
