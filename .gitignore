@@ -1,3 +1,13 @@
+# Node / frontend
+node_modules/
+frontend/dist/
+backend/static/
+*.tsbuildinfo
+npm-debug.log*
+
+# Local conversation data
+data/conversations/*.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

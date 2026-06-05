@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import uuid4
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.config import get_settings, load_model_routes
 from backend.council import CouncilService
@@ -124,6 +126,21 @@ async def get_conversation(run_id: str) -> SenateRun:
     if not run:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return run
+
+
+def _frontend_dir() -> Path | None:
+    """Locate a built frontend: bundled in the wheel (backend/static) or the repo (frontend/dist)."""
+    here = Path(__file__).resolve().parent
+    for candidate in (here / "static", here.parent / "frontend" / "dist"):
+        if (candidate / "index.html").exists():
+            return candidate
+    return None
+
+
+# Mount the SPA last so it never shadows the /api/* routes registered above.
+_frontend = _frontend_dir()
+if _frontend is not None:
+    app.mount("/", StaticFiles(directory=str(_frontend), html=True), name="frontend")
 
 
 if __name__ == "__main__":
