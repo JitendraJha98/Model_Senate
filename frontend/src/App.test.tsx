@@ -13,6 +13,13 @@ vi.mock("./api", () => ({
     defaults: { selected_model_ids: ["a", "b", "c"], leader_model_id: "a", min_models: 3 }
   }),
   getConversations: async () => [],
+  getCouncilRuns: async () => [],
+  getCouncilRun: async () => {
+    throw new Error("not used in this test");
+  },
+  startCouncil: async () => {
+    throw new Error("not used in this test");
+  },
   runSenate: async () => {
     throw new Error("not used in this test");
   }

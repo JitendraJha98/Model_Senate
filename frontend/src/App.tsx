@@ -1,8 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { Bot, Check, Clock, Eye, KeyRound, Loader2, PanelRight, Send, Settings, Sparkles, X } from "lucide-react";
+import { Bot, Check, Clock, Eye, KeyRound, Loader2, Moon, PanelRight, Send, Settings, Sparkles, Sun, X } from "lucide-react";
 import { getConfig, getConversations, getCouncilRun, getCouncilRuns, runSenate, startCouncil } from "./api";
-import type { AggregateRanking, AppConfig, CouncilRun, ModelOutput, ModelRoute, PeerReview, SenateRun } from "./types";
+import { useCouncilStream } from "./hooks/useCouncilStream";
+import type {
+  AggregateRanking,
+  AppConfig,
+  CouncilRun,
+  ModelOutput,
+  ModelRoute,
+  PeerReview,
+  SenateRun
+} from "./types";
+import type { CouncilStreamState } from "./hooks/useCouncilStream";
 
 const SAMPLE_PROMPT =
   "Compare the strongest arguments for and against investing in renewable energy infrastructure over the next decade.";
@@ -17,10 +27,22 @@ export default function App() {
   const [systemContext, setSystemContext] = useState("");
   const [currentRun, setCurrentRun] = useState<SenateRun | null>(null);
   const [currentCouncilRun, setCurrentCouncilRun] = useState<CouncilRun | null>(null);
+  const [councilRunId, setCouncilRunId] = useState<string | null>(null);
+  const councilStream = useCouncilStream(councilRunId);
   const [activeOpinion, setActiveOpinion] = useState(0);
   const [activeView, setActiveView] = useState<"answer" | "council" | "models" | "history">("answer");
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const saved = typeof localStorage !== "undefined" ? localStorage.getItem("ms-theme") : null;
+    if (saved === "light" || saved === "dark") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("ms-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     Promise.all([getConfig(), getConversations(), getCouncilRuns()])
@@ -76,12 +98,16 @@ export default function App() {
         selected_model_ids: selectedIds,
         system_context: systemContext || undefined
       });
+      // Drive the live SSE progress view…
+      setCouncilRunId(run_id);
+      // …while polling for the authoritative persisted run as the source of truth.
       const run = await waitForCouncilRun(run_id);
       setCurrentCouncilRun(run);
       setCouncilRuns((items) => [run, ...items.filter((item) => item.id !== run.id)]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Council run failed");
     } finally {
+      setCouncilRunId(null);
       setIsRunning(false);
     }
   }
@@ -128,6 +154,15 @@ export default function App() {
             </button>
           ))}
         </section>
+
+        <button
+          className="theme-toggle"
+          onClick={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
+          aria-label="Toggle color theme"
+        >
+          {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          {theme === "dark" ? "Light chamber" : "Night chamber"}
+        </button>
       </aside>
 
       <section className="workspace">
@@ -227,7 +262,7 @@ export default function App() {
               </div>
               {error && <div className="error">{error}</div>}
             </section>
-            {isRunning && <LoadingCouncil selectedModels={selectedModels} />}
+            {isRunning && <CouncilLiveProgress stream={councilStream} selectedModels={selectedModels} />}
             {currentCouncilRun && !isRunning && <CouncilResults run={currentCouncilRun} />}
             {!currentCouncilRun && !isRunning && <EmptyState />}
           </>
@@ -235,6 +270,13 @@ export default function App() {
       </section>
     </main>
   );
+}
+
+function runMeta(latencyMs: number, tokens: number, costUsd?: number | null): string {
+  const parts = [`${(latencyMs / 1000).toFixed(1)}s`];
+  if (tokens) parts.push(`${tokens.toLocaleString()} tokens`);
+  if (costUsd != null) parts.push(`$${costUsd.toFixed(costUsd < 0.01 ? 4 : 2)}`);
+  return parts.join(" · ");
 }
 
 async function waitForCouncilRun(runId: string): Promise<CouncilRun> {
@@ -320,7 +362,7 @@ function Results({
       <article className="final-answer">
         <div className="panel-heading">
           <h2>Final synthesis</h2>
-          <p>{run.final_synthesis.leader_display_name} - {run.total_latency_ms} ms</p>
+          <p>{run.final_synthesis.leader_display_name} · {runMeta(run.total_latency_ms, run.total_tokens, run.total_cost_usd)}</p>
         </div>
         {run.final_synthesis.status === "completed" ? (
           <ReactMarkdown>{run.final_synthesis.content}</ReactMarkdown>
@@ -447,45 +489,207 @@ function LoadingRun({ selectedModels }: { selectedModels: ModelRoute[] }) {
   );
 }
 
-function LoadingCouncil({ selectedModels }: { selectedModels: ModelRoute[] }) {
+function CouncilLiveProgress({
+  stream,
+  selectedModels
+}: {
+  stream: CouncilStreamState;
+  selectedModels: ModelRoute[];
+}) {
+  const total = selectedModels.length || 1;
+  const stages: { label: string; done: boolean; detail: string }[] = [
+    {
+      label: "Orchestration",
+      done: stream.plan !== null,
+      detail: stream.plan ? `Query type: ${stream.plan.query_type}` : "Classifying the query…"
+    },
+    {
+      label: "First opinions",
+      done: stream.opinions.length >= total,
+      detail: `${stream.opinions.length}/${total} models responded`
+    },
+    {
+      label: "Cross critique",
+      done: stream.critiques.length > 0,
+      detail: stream.critiques.length > 0 ? `${stream.critiques.length} critiques scored` : "Peers reviewing each other…"
+    },
+    {
+      label: "Leader election",
+      done: stream.election !== null,
+      detail: stream.election ? `Elected ${stream.election.elected_display_name}` : "Scoring candidates…"
+    },
+    {
+      label: "Synthesis",
+      done: stream.synthesis !== null,
+      detail: stream.synthesis ? `By ${stream.synthesis.leader_display_name}` : "Awaiting election…"
+    },
+    {
+      label: "Validation",
+      done: stream.validation !== null,
+      detail: stream.validation ? `Verdict: ${stream.validation.verdict ?? stream.validation.status}` : "Awaiting synthesis…"
+    }
+  ];
+
+  // The first stage that is not yet done is the one currently in flight.
+  const activeIndex = stages.findIndex((stage) => !stage.done);
+
+  const nameFor = (modelId: string) =>
+    selectedModels.find((model) => model.id === modelId)?.display_name ?? modelId;
+  const settledIds = new Set(stream.opinions.map((opinion) => opinion.model_id));
+  const drafting = Object.entries(stream.opinionDrafts).filter(([modelId]) => !settledIds.has(modelId));
+
   return (
-    <section className="loading-run">
-      {["Orchestration", "First opinions", "Cross critique", "Leader election", "Synthesis", "Validation"].map((stage, index) => (
-        <div className="stage" key={stage}>
-          <Loader2 className="spin" size={18} />
-          <strong>{stage}</strong>
-          <span>{index === 1 ? selectedModels.map((model) => model.display_name).join(", ") : "Queued in the Council pipeline"}</span>
-        </div>
-      ))}
+    <section className="results">
+      <section className="loading-run">
+        {stages.map((stage, index) => (
+          <div className="stage" key={stage.label}>
+            {stage.done ? (
+              <Check size={18} />
+            ) : index === activeIndex ? (
+              <Loader2 className="spin" size={18} />
+            ) : (
+              <Clock size={18} />
+            )}
+            <strong>{stage.label}</strong>
+            <span>{stage.detail}</span>
+          </div>
+        ))}
+      </section>
+
+      {drafting.length > 0 && (
+        <article className="panel">
+          <div className="panel-heading">
+            <h2>Live drafting</h2>
+            <p>Token-by-token output as each model thinks.</p>
+          </div>
+          <div className="review-list">
+            {drafting.map(([modelId, text]) => (
+              <div className="review" key={modelId}>
+                <h3>
+                  <Loader2 className="spin" size={16} /> {nameFor(modelId)}
+                </h3>
+                <p className="muted typing">{text}</p>
+              </div>
+            ))}
+          </div>
+        </article>
+      )}
+
+      {stream.opinions.length > 0 && (
+        <article className="panel">
+          <div className="panel-heading">
+            <h2>Opinions arriving live</h2>
+            <p>Streamed straight from the pipeline as each model finishes.</p>
+          </div>
+          <div className="review-list">
+            {stream.opinions.map((opinion) => (
+              <div className="review" key={opinion.model_id}>
+                <h3>
+                  {opinion.status === "failed" ? <X size={16} /> : <Check size={16} />} {opinion.display_name} — {opinion.role}
+                </h3>
+                {opinion.status === "failed" ? (
+                  <div className="error">{opinion.error}</div>
+                ) : (
+                  <p className="muted">{opinion.answer_summary || `${opinion.content.slice(0, 240)}…`}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </article>
+      )}
     </section>
   );
 }
 
 function CouncilResults({ run }: { run: CouncilRun }) {
+  const isMultiPart = run.reintegration != null;
   return (
     <section className="results">
-      <article className="final-answer">
-        <div className="panel-heading">
-          <h2>Model Council synthesis</h2>
-          <p>
-            {run.synthesis?.leader_display_name ?? "No leader"} -{" "}
-            {run.confidence_grade ?? "ungraded"} - {run.total_latency_ms} ms
-          </p>
-        </div>
-        {run.synthesis?.status === "completed" ? (
-          <>
-            <ReactMarkdown>{run.synthesis.direct_answer}</ReactMarkdown>
-            {run.validation && (
-              <p className="muted">
-                Validation: {run.validation.verdict ?? run.validation.status}
-                {run.validation.addendum && ` — ${run.validation.addendum}`}
-              </p>
-            )}
-          </>
-        ) : (
-          <div className="error">{run.synthesis?.error ?? "Synthesis failed"}</div>
-        )}
-      </article>
+      {isMultiPart && run.reintegration ? (
+        <article className="final-answer">
+          <div className="panel-heading">
+            <h2>Re-integrated answer</h2>
+            <p>
+              {run.reintegration.display_name} · {run.sub_runs.length} sub-questions · grade{" "}
+              {run.confidence_grade ?? "—"} · {runMeta(run.total_latency_ms, run.total_tokens, run.total_cost_usd)}
+            </p>
+          </div>
+          <ReactMarkdown>{run.reintegration.unified_answer || "No unified answer produced."}</ReactMarkdown>
+          {run.reintegration.contradictions_unresolved.length > 0 && (
+            <div className="extracted-ranking">
+              <strong>Unresolved contradictions</strong>
+              <ul>
+                {run.reintegration.contradictions_unresolved.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </article>
+      ) : (
+        <article className="final-answer">
+          <div className="panel-heading">
+            <h2>Model Council synthesis</h2>
+            <p>
+              {run.synthesis?.leader_display_name ?? "No leader"} · grade{" "}
+              {run.confidence_grade ?? "—"} · {runMeta(run.total_latency_ms, run.total_tokens, run.total_cost_usd)}
+            </p>
+          </div>
+          {run.synthesis?.status === "completed" ? (
+            <>
+              <ReactMarkdown>{run.synthesis.direct_answer}</ReactMarkdown>
+              {run.synthesis.unresolved_conflicts.length > 0 && (
+                <div className="extracted-ranking">
+                  <strong>Unresolved conflicts</strong>
+                  <ul>
+                    {run.synthesis.unresolved_conflicts.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {run.synthesis.recommended_next_checks.length > 0 && (
+                <div className="extracted-ranking">
+                  <strong>Recommended next checks</strong>
+                  <ul>
+                    {run.synthesis.recommended_next_checks.map((c, i) => (
+                      <li key={i}>{c}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {run.validation && (
+                <p className="muted">
+                  Validation: {run.validation.verdict ?? run.validation.status}
+                  {run.validation.issues.length > 0 && ` — ${run.validation.issues.join("; ")}`}
+                  {run.validation.addendum && ` — ${run.validation.addendum}`}
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="error">{run.synthesis?.error ?? "Synthesis failed"}</div>
+          )}
+        </article>
+      )}
+
+      {isMultiPart && (
+        <article className="panel">
+          <div className="panel-heading">
+            <h2>Sub-question answers</h2>
+            <p>Each part was run through its own Council pipeline.</p>
+          </div>
+          <div className="review-list">
+            {run.sub_runs.map((sub) => (
+              <div className="review" key={sub.id}>
+                <h3>
+                  {sub.prompt} <small>(grade {sub.confidence_grade ?? "N/A"})</small>
+                </h3>
+                <ReactMarkdown>{sub.synthesis?.direct_answer || "No synthesis produced."}</ReactMarkdown>
+              </div>
+            ))}
+          </div>
+        </article>
+      )}
 
       <article className="panel">
         <div className="panel-heading">
@@ -540,7 +744,7 @@ function CouncilResults({ run }: { run: CouncilRun }) {
         </article>
       )}
 
-      <div className="detail-grid">
+      {!isMultiPart && <div className="detail-grid">
         <article className="panel">
           <div className="panel-heading">
             <h2>Agent opinions</h2>
@@ -568,43 +772,8 @@ function CouncilResults({ run }: { run: CouncilRun }) {
             ))}
           </div>
         </article>
-        <article className="panel">
-          <div className="panel-heading">
-            <h2>Critique matrix</h2>
-            <p>Reviewer → target scores (factual accuracy).</p>
-          </div>
-          <div className="review-list">
-            {run.council_critiques.map((critique) => {
-              const avg =
-                critique.factual_accuracy_score != null &&
-                critique.logical_validity_score != null &&
-                critique.completeness_score != null &&
-                critique.calibration_score != null
-                  ? Math.round(
-                      ((critique.factual_accuracy_score +
-                        critique.logical_validity_score +
-                        critique.completeness_score +
-                        critique.calibration_score) /
-                        4) *
-                        100
-                    )
-                  : null;
-              return (
-                <div
-                  className="ranking-row"
-                  key={`${critique.reviewer_model_id}-${critique.target_model_id}`}
-                >
-                  <span>
-                    {critique.reviewer_display_name} [{critique.reviewer_critique_role}] →{" "}
-                    {critique.target_display_name}
-                  </span>
-                  <b>{avg != null ? `${avg}%` : "n/a"}{critique.overall_rank != null ? ` rank ${critique.overall_rank}` : ""}</b>
-                </div>
-              );
-            })}
-          </div>
-        </article>
-      </div>
+        <CritiqueHeatmap run={run} />
+      </div>}
 
       {run.synthesis?.consensus_points && run.synthesis.consensus_points.length > 0 && (
         <article className="panel">
@@ -624,6 +793,93 @@ function CouncilResults({ run }: { run: CouncilRun }) {
         </article>
       )}
     </section>
+  );
+}
+
+function CritiqueHeatmap({ run }: { run: CouncilRun }) {
+  const models = run.selected_models.filter((model) =>
+    run.council_critiques.some(
+      (c) => c.reviewer_model_id === model.id || c.target_model_id === model.id
+    )
+  );
+  const byPair = new Map(
+    run.council_critiques.map((c) => [`${c.reviewer_model_id}:${c.target_model_id}`, c])
+  );
+
+  const avgScore = (modelA: string, modelB: string): number | null => {
+    const c = byPair.get(`${modelA}:${modelB}`);
+    if (
+      !c ||
+      c.factual_accuracy_score == null ||
+      c.logical_validity_score == null ||
+      c.completeness_score == null ||
+      c.calibration_score == null
+    ) {
+      return null;
+    }
+    return (
+      (c.factual_accuracy_score +
+        c.logical_validity_score +
+        c.completeness_score +
+        c.calibration_score) /
+      4
+    );
+  };
+
+  // Red (low) → gold → green (high)
+  const cellColor = (value: number) => `hsl(${Math.round(value * 132)} 58% 72%)`;
+  const short = (name: string) => name.split(" ")[0];
+
+  return (
+    <article className="panel">
+      <div className="panel-heading">
+        <h2>Critique heatmap</h2>
+        <p>How each reviewer (row) scored each peer (column), averaged across all four axes.</p>
+      </div>
+      <div className="heatmap">
+        <table>
+          <thead>
+            <tr>
+              <th className="row-head">Reviewer ↓ / Target →</th>
+              {models.map((model) => (
+                <th key={model.id}>{short(model.display_name)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {models.map((reviewer) => (
+              <tr key={reviewer.id}>
+                <td className="row-head">{short(reviewer.display_name)}</td>
+                {models.map((target) => {
+                  if (reviewer.id === target.id) {
+                    return (
+                      <td className="heatmap-cell self" key={target.id}>
+                        —
+                      </td>
+                    );
+                  }
+                  const score = avgScore(reviewer.id, target.id);
+                  return (
+                    <td
+                      className="heatmap-cell"
+                      key={target.id}
+                      style={score != null ? { background: cellColor(score) } : undefined}
+                    >
+                      {score != null ? `${Math.round(score * 100)}` : "·"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="heatmap-legend">
+        <span>weaker</span>
+        <div className="bar" />
+        <span>stronger</span>
+      </div>
+    </article>
   );
 }
 

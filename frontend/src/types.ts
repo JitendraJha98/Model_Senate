@@ -90,6 +90,8 @@ export interface SenateRun {
   final_synthesis: FinalSynthesis;
   errors: string[];
   total_latency_ms: number;
+  total_tokens: number;
+  total_cost_usd?: number | null;
   metadata: Record<string, unknown>;
 }
 

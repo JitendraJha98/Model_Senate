@@ -12,6 +12,7 @@ import type {
 export interface CouncilStreamState {
   plan: OrchestrationPlan | null;
   opinions: AgentOpinion[];
+  opinionDrafts: Record<string, string>;
   critiques: CouncilCritique[];
   election: LeaderElection | null;
   synthesis: CouncilSynthesis | null;
@@ -24,6 +25,7 @@ export interface CouncilStreamState {
 type EventAction =
   | { type: "plan_ready"; payload: OrchestrationPlan }
   | { type: "agent_opinion"; payload: AgentOpinion }
+  | { type: "opinion_token"; payload: { model_id: string; delta: string } }
   | { type: "critique_scored"; payload: CouncilCritique }
   | { type: "leader_elected"; payload: LeaderElection }
   | { type: "synthesis_ready"; payload: CouncilSynthesis }
@@ -35,6 +37,7 @@ type EventAction =
 const initialState: CouncilStreamState = {
   plan: null,
   opinions: [],
+  opinionDrafts: {},
   critiques: [],
   election: null,
   synthesis: null,
@@ -50,6 +53,14 @@ function reducer(state: CouncilStreamState, action: EventAction): CouncilStreamS
       return { ...state, plan: action.payload };
     case "agent_opinion":
       return { ...state, opinions: [...state.opinions.filter((item) => item.model_id !== action.payload.model_id), action.payload] };
+    case "opinion_token":
+      return {
+        ...state,
+        opinionDrafts: {
+          ...state.opinionDrafts,
+          [action.payload.model_id]: (state.opinionDrafts[action.payload.model_id] ?? "") + action.payload.delta
+        }
+      };
     case "critique_scored":
       return { ...state, critiques: [...state.critiques, action.payload] };
     case "leader_elected":
@@ -87,6 +98,7 @@ export function useCouncilStream(runId: string | null): CouncilStreamState {
 
     bind<OrchestrationPlan>("plan_ready");
     bind<AgentOpinion>("agent_opinion");
+    bind<{ model_id: string; delta: string }>("opinion_token");
     bind<CouncilCritique>("critique_scored");
     bind<LeaderElection>("leader_elected");
     bind<CouncilSynthesis>("synthesis_ready");
