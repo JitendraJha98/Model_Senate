@@ -8,11 +8,24 @@ from pydantic import ValidationError
 
 from backend.providers import ProviderAdapter
 from backend.roles import ROLE_CONFIGS, AgentRole, roles_for_query
-from backend.schemas import ChatMessage, ModelRoute, OrchestrationPlan, QueryType
+from backend.schemas import ChatMessage, ModelRoute, OrchestrationPlan, QueryType, SubQuestion
 
 
-ORCHESTRATOR_SYSTEM = """You are an orchestration agent for Model Council.
-Do not answer the query. Return only valid JSON matching the requested plan schema."""
+ORCHESTRATOR_SYSTEM = """\
+You are an orchestration agent for Model Council, a multi-model deliberation system.
+Your job is to analyze the user's query and return a structured JSON orchestration plan.
+Do not answer the query. Only produce the plan.
+
+Return ONLY valid JSON matching the provided schema. No prose. No markdown. Raw JSON only.
+
+Query type taxonomy:
+- factual: has a ground-truth answer, verifiable with sources
+- analytical: requires reasoning, weighing evidence, drawing conclusions
+- code: involves writing, debugging, or explaining code or computation
+- ethics: involves value judgements, moral reasoning, competing principles
+- creative: open-ended, no single correct answer
+- multi_part: contains multiple distinct questions benefiting from independent treatment\
+"""
 
 
 async def classify_query(
@@ -33,8 +46,8 @@ async def classify_query(
                 ],
             )
             data = json.loads(_extract_json(content))
-            plan = OrchestrationPlan.model_validate(data)
-            return _normalize_plan(plan, model_ids, tool_registry)
+            plan = _parse_plan(data, model_ids, tool_registry)
+            return plan
         except (json.JSONDecodeError, ValidationError, KeyError, ValueError):
             pass
         except Exception:
@@ -51,60 +64,82 @@ def fallback_plan(prompt: str, model_ids: list[str], tool_registry: dict[str, An
         sub_questions=[],
         role_assignments=roles,
         tool_assignments=_assign_tools(roles, tool_registry),
-        decomposition_rationale="Fallback heuristic plan; no decomposition applied.",
+        decomposition_rationale="Fallback heuristic plan; orchestrator call failed.",
         orchestration_status="fallback",
     )
 
 
 def _build_prompt(prompt: str, model_ids: list[str]) -> str:
-    return f"""Query: {prompt}
+    return f"""\
+Query: {prompt}
 
 Available models: {model_ids}
 
 Return an OrchestrationPlan JSON object with:
 - query_type: one of [factual, analytical, code, ethics, creative, multi_part]
 - is_multi_part: boolean
-- sub_questions: list of strings
-- role_assignments: object mapping model_id to role name
-- tool_assignments: object mapping model_id to list of tool names
-- decomposition_rationale: one sentence"""
+- sub_questions: list of objects with "question" and "query_type" keys \
+(empty if not multi_part, 2-5 items if multi_part)
+- role_assignments: dict mapping model_id to role name
+- tool_assignments: dict mapping model_id to list of tool names
+- decomposition_rationale: one sentence explaining why decomposition was/was not applied\
+"""
 
 
-def _normalize_plan(plan: OrchestrationPlan, model_ids: list[str], tool_registry: dict[str, Any]) -> OrchestrationPlan:
-    roles = plan.role_assignments or _assign_roles(plan.query_type, model_ids)
-    roles = {model_id: roles.get(model_id) or "Independent Expert" for model_id in model_ids}
-    return plan.model_copy(
-        update={
-            "role_assignments": roles,
-            "tool_assignments": _assign_tools(roles, tool_registry),
-            "sub_questions": plan.sub_questions[:5],
-            "is_multi_part": bool(plan.sub_questions) if plan.query_type == "multi_part" else False,
-        }
+def _parse_plan(data: dict, model_ids: list[str], tool_registry: dict[str, Any]) -> OrchestrationPlan:
+    query_type: QueryType = data.get("query_type", "analytical")
+    if query_type not in ("factual", "analytical", "code", "ethics", "creative", "multi_part"):
+        query_type = "analytical"
+
+    raw_sub = data.get("sub_questions") or []
+    sub_questions: list[SubQuestion] = []
+    for item in raw_sub[:5]:
+        if isinstance(item, dict) and "question" in item:
+            sq_type = item.get("query_type", "analytical")
+            if sq_type not in ("factual", "analytical", "code", "ethics", "creative", "multi_part"):
+                sq_type = "analytical"
+            sub_questions.append(SubQuestion(question=item["question"], query_type=sq_type))
+        elif isinstance(item, str):
+            sub_questions.append(SubQuestion(question=item, query_type="analytical"))
+
+    is_multi = bool(sub_questions) and query_type == "multi_part"
+
+    raw_roles: dict[str, str] = data.get("role_assignments") or {}
+    roles = {mid: raw_roles.get(mid, "Independent Expert") for mid in model_ids}
+
+    return OrchestrationPlan(
+        query_type=query_type,
+        is_multi_part=is_multi,
+        sub_questions=sub_questions,
+        role_assignments=roles,
+        tool_assignments=_assign_tools(roles, tool_registry),
+        decomposition_rationale=str(data.get("decomposition_rationale", "")),
+        orchestration_status="success",
     )
 
 
 def _assign_roles(query_type: QueryType, model_ids: list[str]) -> dict[str, str]:
     roles = roles_for_query(query_type, len(model_ids))
-    return {model_id: roles[index].value for index, model_id in enumerate(model_ids)}
+    return {mid: roles[i].value for i, mid in enumerate(model_ids)}
 
 
 def _assign_tools(role_assignments: dict[str, str], tool_registry: dict[str, Any]) -> dict[str, list[str]]:
     by_name = {config.name: config.default_tools for config in ROLE_CONFIGS.values()}
     return {
-        model_id: [tool for tool in by_name.get(role, ()) if tool in tool_registry]
-        for model_id, role in role_assignments.items()
+        mid: [t for t in by_name.get(role, ()) if t in tool_registry]
+        for mid, role in role_assignments.items()
     }
 
 
 def _heuristic_query_type(prompt: str) -> QueryType:
     lowered = prompt.lower()
-    if any(word in lowered for word in ["code", "python", "javascript", "bug", "function", "traceback"]):
+    if any(w in lowered for w in ["code", "python", "javascript", "bug", "function", "traceback", "compile"]):
         return "code"
-    if any(word in lowered for word in ["ethical", "ethics", "moral", "should society"]):
+    if any(w in lowered for w in ["ethical", "ethics", "moral", "should society", "is it right"]):
         return "ethics"
-    if any(word in lowered for word in ["write a story", "brainstorm", "creative", "poem"]):
+    if any(w in lowered for w in ["write a story", "brainstorm", "creative", "poem", "imagine"]):
         return "creative"
-    if any(word in lowered for word in ["who", "when", "where", "latest", "current", "source"]):
+    if any(w in lowered for w in ["who", "when", "where", "latest", "current", "source", "cite"]):
         return "factual"
     return "analytical"
 

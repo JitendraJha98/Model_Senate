@@ -102,6 +102,12 @@ class SenateService:
             final_synthesis=final_synthesis,
             errors=[error for error in errors if error],
             total_latency_ms=int((time.perf_counter() - started) * 1000),
+            total_tokens=sum((o.usage.total_tokens or 0) for o in first_opinions if o.usage),
+            total_cost_usd=(
+                round(sum(o.usage.cost for o in first_opinions if o.usage and o.usage.cost is not None), 6)
+                if any(o.usage and o.usage.cost is not None for o in first_opinions)
+                else None
+            ),
             metadata={
                 "successful_first_opinions": len(successful),
                 "pipeline": "three-stage-full",
