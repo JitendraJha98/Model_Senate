@@ -13,7 +13,9 @@ uv run pytest tests/test_senate.py::test_name  # Run a single test
 ```
 
 ### Frontend (TypeScript/React)
+Run these from the `frontend/` directory (that's where `package.json` lives).
 ```bash
+cd frontend
 npm install          # Install dependencies
 npm run dev          # Start Vite dev server (port 5173, proxies /api → backend)
 npm run build        # TypeScript compile + production build
@@ -74,6 +76,7 @@ Abstract base `ProviderAdapter` with a single async `complete()` method. Concret
 | `roles.py` | `AgentRole`, `CritiqueRole` enums; `QUERY_ROLE_MAP`; system prompt builders |
 | `election.py` | `elect_leader()` — scores candidates, returns `LeaderElection` |
 | `validator.py` | `build_validation_prompt()` / `parse_validation_result()` for Stage 5 |
+| `reintegrator.py` | `detect_contradictions()` / re-integration prompt + parsing for Stage 6 (multi-part) |
 | `tools.py` | `CalculatorTool`, `CodeExecutorTool`, `WebSearchTool`; `inject_tool_results()` |
 | `streaming.py` | `CouncilEventStream` (asyncio queue) and `active_streams` registry |
 | `storage.py` | `ConversationStore` reads/writes JSON under `data/conversations/` |
