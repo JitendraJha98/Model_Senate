@@ -119,6 +119,17 @@ export default function App() {
     }
   }
 
+  const handleKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      if (activeView === "answer") {
+      submit();
+    } else if (activeView === "council") {
+      submitCouncil();
+    }
+    }
+  };
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -211,20 +222,27 @@ export default function App() {
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder={SAMPLE_PROMPT}
                 rows={4}
+                onKeyDown={handleKeyDown}
               />
               <textarea
                 value={systemContext}
                 onChange={(event) => setSystemContext(event.target.value)}
                 placeholder="Optional context, constraints, source notes, or audience..."
                 rows={2}
+                onKeyDown={handleKeyDown}
               />
               <div className="composer-actions">
                 <div className={selectedIds.length >= 3 ? "hint ok" : "hint"}>
                   {selectedIds.length >= 3 ? <Check size={16} /> : <X size={16} />} Select at least 3 models
                 </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className="hint" style={{margin:0,opacity:0.7}}>
+                    <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run
+                  </span>
                 <button className="primary" disabled={!canRun} onClick={submit}>
                   {isRunning ? <Loader2 className="spin" size={18} /> : <Send size={18} />} Run Senate
                 </button>
+              </div>
               </div>
               {error && <div className="error">{error}</div>}
             </section>
@@ -245,20 +263,27 @@ export default function App() {
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder={SAMPLE_PROMPT}
                 rows={4}
+                onKeyDown={handleKeyDown}
               />
               <textarea
                 value={systemContext}
                 onChange={(event) => setSystemContext(event.target.value)}
                 placeholder="Optional context, constraints, source notes, or audience..."
                 rows={2}
+                onKeyDown={handleKeyDown}
               />
               <div className="composer-actions">
                 <div className={canRunCouncil ? "hint ok" : "hint"}>
                   {canRunCouncil ? <Check size={16} /> : <X size={16} />} Select at least {config?.defaults.council_min_models ?? 2} models
                 </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className="hint" style={{margin:0,opacity:0.7}}>
+                    <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run
+                  </span>
                 <button className="primary" disabled={!canRunCouncil} onClick={submitCouncil}>
                   {isRunning ? <Loader2 className="spin" size={18} /> : <Send size={18} />} Run Council
                 </button>
+              </div>
               </div>
               {error && <div className="error">{error}</div>}
             </section>
