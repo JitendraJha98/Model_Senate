@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-ProviderName = Literal["openrouter", "openai", "anthropic", "google", "xai"]
+ProviderName = Literal["openrouter", "openai", "anthropic", "google", "xai", "groq"]
 RunStatus = Literal["completed", "approved_with_caveats", "partial_failed", "failed"]
 QueryType = Literal["factual", "analytical", "code", "ethics", "creative", "multi_part"]
 

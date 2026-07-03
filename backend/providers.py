@@ -70,6 +70,9 @@ class ProviderAdapter(ABC):
             if response is not None:
                 if response.status_code in RETRYABLE_STATUS and attempt < self.max_retries:
                     last_error = f"HTTP {response.status_code}"
+                    retry_after = float(response.headers.get("Retry-After", 0))
+                    await asyncio.sleep(max(retry_after, min(8.0, 2 ** attempt)) + random.uniform(0, 0.4))
+                    continue
                 else:
                     return response
             if attempt < self.max_retries:
@@ -225,6 +228,7 @@ def build_adapters(settings: Any) -> dict[str, ProviderAdapter]:
         "openrouter": OpenAICompatibleAdapter(settings.openrouter_api_key, "https://openrouter.ai/api/v1", **opts),
         "openai": OpenAICompatibleAdapter(settings.openai_api_key, "https://api.openai.com/v1", **opts),
         "xai": OpenAICompatibleAdapter(settings.xai_api_key, "https://api.x.ai/v1", **opts),
+        "groq": OpenAICompatibleAdapter(settings.groq_api_key, "https://api.groq.com/openai/v1", **opts),
         "anthropic": AnthropicAdapter(settings.anthropic_api_key, **opts),
         "google": GoogleAdapter(settings.google_api_key, **opts),
     }
