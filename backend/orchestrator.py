@@ -38,16 +38,17 @@ async def classify_query(
     model_ids = [route.id for route in selected_routes]
     if orchestrator_route and adapter:
         try:
-            content, _, _ = await adapter.complete(
+            content, usage, _ = await adapter.complete(
                 orchestrator_route,
                 [
                     ChatMessage(role="system", content=ORCHESTRATOR_SYSTEM),
                     ChatMessage(role="user", content=_build_prompt(prompt, model_ids)),
                 ],
+                json_mode=True,
             )
             data = json.loads(_extract_json(content))
             plan = _parse_plan(data, model_ids, tool_registry)
-            return plan
+            return plan.model_copy(update={"usage": usage})
         except (json.JSONDecodeError, ValidationError, KeyError, ValueError):
             pass
         except Exception:

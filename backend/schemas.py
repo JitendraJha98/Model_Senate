@@ -19,6 +19,12 @@ class ModelRoute(BaseModel):
     enabled: bool = True
     supports_streaming: bool = False
     missing_key: bool = False
+    # Optional generation controls. None → the provider's own default is used
+    # (behavior preserved for existing routes). Set temperature=0 for reproducible eval runs.
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    seed: int | None = None
 
 
 class ChatMessage(BaseModel):
@@ -83,6 +89,7 @@ class PeerReview(BaseModel):
     content: str = ""
     error: str | None = None
     latency_ms: int | None = None
+    usage: UsageMetadata | None = None
 
 
 class FinalSynthesis(BaseModel):
@@ -92,6 +99,7 @@ class FinalSynthesis(BaseModel):
     content: str = ""
     error: str | None = None
     latency_ms: int | None = None
+    usage: UsageMetadata | None = None
 
 
 class SenateRun(BaseModel):
@@ -153,6 +161,7 @@ class OrchestrationPlan(BaseModel):
     tool_assignments: dict[str, list[str]] = Field(default_factory=dict)
     decomposition_rationale: str = ""
     orchestration_status: Literal["success", "fallback"] = "success"
+    usage: UsageMetadata | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +272,7 @@ class SynthesisValidation(BaseModel):
     addendum: str | None = None
     error: str | None = None
     latency_ms: int | None = None
+    usage: UsageMetadata | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +290,7 @@ class ReintegrationOutput(BaseModel):
     final_confidence_grade: Literal["A", "B", "C", "D", "F"] | None = None
     error: str | None = None
     latency_ms: int | None = None
+    usage: UsageMetadata | None = None
 
 
 # ---------------------------------------------------------------------------

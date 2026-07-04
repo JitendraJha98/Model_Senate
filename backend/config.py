@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     orchestrator_provider: ProviderName = "openrouter"
     council_min_models: int = 2
     council_synthesis_retry_on_failure: bool = True
+    council_max_tool_iterations: int = 3
     provider_timeout_seconds: float = 90.0
     provider_max_retries: int = 2
     max_concurrent_requests: int = 8

@@ -4,7 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,7 @@ council_service = CouncilService(
     tool_registry=build_tool_registry(settings),
     orchestrator_model_id=settings.orchestrator_model_id,
     synthesis_retry_on_failure=settings.council_synthesis_retry_on_failure,
+    max_tool_iterations=settings.council_max_tool_iterations,
 )
 
 app = FastAPI(title="Model_Senate API", version="0.1.0")
@@ -95,11 +96,16 @@ async def run_council(request: CouncilRequest, background_tasks: BackgroundTasks
 
 
 @app.get("/api/council/run/{run_id}/stream")
-async def stream_council_run(run_id: str) -> StreamingResponse:
+async def stream_council_run(run_id: str, request: Request) -> StreamingResponse:
     stream = get_stream(run_id)
     if not stream:
         raise HTTPException(status_code=404, detail="Council stream not found")
-    return StreamingResponse(stream.events(), media_type="text/event-stream")
+    # Resume from the last delivered event on reconnect (EventSource sets this header).
+    try:
+        start = int(request.headers.get("last-event-id", 0))
+    except ValueError:
+        start = 0
+    return StreamingResponse(stream.events(start), media_type="text/event-stream")
 
 
 @app.get("/api/council/run/{run_id}", response_model=CouncilRun)

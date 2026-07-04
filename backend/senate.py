@@ -87,6 +87,11 @@ class SenateService:
         elif errors:
             status = "partial_failed"
 
+        _billed = [
+            item.usage
+            for item in [*first_opinions, *peer_reviews, final_synthesis]
+            if item.usage
+        ]
         completed_at = datetime.now(timezone.utc)
         run = SenateRun(
             id=str(uuid4()),
@@ -102,10 +107,10 @@ class SenateService:
             final_synthesis=final_synthesis,
             errors=[error for error in errors if error],
             total_latency_ms=int((time.perf_counter() - started) * 1000),
-            total_tokens=sum((o.usage.total_tokens or 0) for o in first_opinions if o.usage),
+            total_tokens=sum((u.total_tokens or 0) for u in _billed),
             total_cost_usd=(
-                round(sum(o.usage.cost for o in first_opinions if o.usage and o.usage.cost is not None), 6)
-                if any(o.usage and o.usage.cost is not None for o in first_opinions)
+                round(sum(u.cost for u in _billed if u.cost is not None), 6)
+                if any(u.cost is not None for u in _billed)
                 else None
             ),
             metadata={
@@ -147,7 +152,7 @@ class SenateService:
         alias_map = {f"Response {chr(65 + index)}": opinion.model_id for index, opinion in enumerate(reviewable)}
         prompt = build_review_prompt(reviewable)
         try:
-            content, _, latency_ms = await self.adapters[reviewer.provider].complete(
+            content, usage, latency_ms = await self.adapters[reviewer.provider].complete(
                 reviewer,
                 [ChatMessage(role="system", content=REVIEW_SYSTEM), ChatMessage(role="user", content=prompt)],
             )
@@ -159,6 +164,7 @@ class SenateService:
                 parsed_ranking=parse_ranking_from_text(content, alias_map, opinions),
                 content=content,
                 latency_ms=latency_ms,
+                usage=usage,
             )
         except Exception as exc:
             return PeerReview(
@@ -179,7 +185,7 @@ class SenateService:
         aggregate_rankings: list[AggregateRanking],
     ) -> FinalSynthesis:
         try:
-            content, _, latency_ms = await self.adapters[leader.provider].complete(
+            content, usage, latency_ms = await self.adapters[leader.provider].complete(
                 leader,
                 [
                     ChatMessage(role="system", content=SYNTHESIS_SYSTEM),
@@ -195,6 +201,7 @@ class SenateService:
                 status="completed",
                 content=content,
                 latency_ms=latency_ms,
+                usage=usage,
             )
         except Exception as exc:
             return FinalSynthesis(
