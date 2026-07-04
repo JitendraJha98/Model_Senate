@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     google_api_key: str | None = None
     xai_api_key: str | None = None
+    groq_api_key: str | None = None
     frontend_origin: str = "http://localhost:5173"
     model_senate_host: str = "127.0.0.1"
     model_senate_port: int = 8001
@@ -96,6 +97,7 @@ def provider_has_key(settings: Settings, provider: ProviderName) -> bool:
             "anthropic": settings.anthropic_api_key,
             "google": settings.google_api_key,
             "xai": settings.xai_api_key,
+            "groq": settings.groq_api_key,
         }[provider]
     )
 
