@@ -32,9 +32,10 @@ from backend.schemas import (
     SubQuestion,
     SynthesisValidation,
     ToolResult,
+    UsageMetadata,
 )
 from backend.storage import ConversationStore
-from backend.streaming import CouncilEventStream
+from backend.streaming import CouncilEventStream, ScopedEventStream
 from backend.tools import ToolRegistry, inject_tool_results
 from backend.validator import build_validation_prompt, parse_validation_result
 
@@ -48,6 +49,7 @@ class CouncilService:
         tool_registry: ToolRegistry,
         orchestrator_model_id: str,
         synthesis_retry_on_failure: bool = True,
+        max_tool_iterations: int = 3,
     ):
         self.routes = {route.id: route for route in routes}
         self.adapters = adapters
@@ -55,6 +57,7 @@ class CouncilService:
         self.tool_registry = tool_registry
         self.orchestrator_model_id = orchestrator_model_id
         self.synthesis_retry_on_failure = synthesis_retry_on_failure
+        self.max_tool_iterations = max(1, max_tool_iterations)
 
     async def run(
         self,
@@ -119,6 +122,10 @@ class CouncilService:
         elif any(r.status in {"failed", "partial_failed"} for r in sub_runs):
             status = "partial_failed"
 
+        # Sub-runs already tally their own stages; add only the top-level orchestration
+        # and re-integration calls so nothing is double-counted.
+        extra_usages = _usages_of(plan, reintegration)
+
         completed_at = datetime.now(timezone.utc)
         return CouncilRun(
             id=run_id,
@@ -134,10 +141,14 @@ class CouncilService:
             prompt=request.prompt,
             selected_models=selected,
             total_latency_ms=int((time.perf_counter() - started) * 1000),
-            total_tokens=sum(r.total_tokens for r in sub_runs),
+            total_tokens=sum(r.total_tokens for r in sub_runs) + _sum_tokens(extra_usages),
             total_cost_usd=(
-                round(sum(r.total_cost_usd for r in sub_runs if r.total_cost_usd), 6)
-                if any(r.total_cost_usd for r in sub_runs)
+                round(
+                    sum(r.total_cost_usd for r in sub_runs if r.total_cost_usd)
+                    + (_sum_cost(extra_usages) or 0.0),
+                    6,
+                )
+                if any(r.total_cost_usd for r in sub_runs) or _sum_cost(extra_usages) is not None
                 else None
             ),
             metadata={"pipeline": "model-council", "mode": "multi_part"},
@@ -162,7 +173,9 @@ class CouncilService:
         rid = str(uuid4())
         started = time.perf_counter()
         created_at = datetime.now(timezone.utc)
-        return await self._run_single(rid, sub_request, selected, sub_plan, stream, started, created_at)
+        # Tag this sub-run's interleaved events so the client can attribute them.
+        scoped = ScopedEventStream(stream, rid) if stream else None
+        return await self._run_single(rid, sub_request, selected, sub_plan, scoped, started, created_at)
 
     # ------------------------------------------------------------------
     # Single pipeline (Stages 1–5)
@@ -198,7 +211,10 @@ class CouncilService:
                 metadata={"pipeline": "model-council", "failure": "all_stage1_failed"},
             )
 
-        critiques = await self._stage2_critique(successful, stream) if len(successful) >= 2 else []
+        if len(successful) >= 2:
+            critiques, critique_usages = await self._stage2_critique(successful, stream)
+        else:
+            critiques, critique_usages = [], []
 
         election = elect_leader(successful, critiques)
         await self._emit(stream, "leader_elected", election.model_dump())
@@ -251,8 +267,8 @@ class CouncilService:
             selected_models=selected,
             errors=[e for e in errors if e],
             total_latency_ms=int((time.perf_counter() - started) * 1000),
-            total_tokens=sum((o.usage.total_tokens or 0) for o in [*opinions, synthesis] if o.usage),
-            total_cost_usd=_sum_cost([*opinions, synthesis]),
+            total_tokens=_sum_tokens([*_usages_of(opinions, synthesis, validation, plan), *critique_usages]),
+            total_cost_usd=_sum_cost([*_usages_of(opinions, synthesis, validation, plan), *critique_usages]),
             metadata={"pipeline": "model-council", "successful_first_opinions": len(successful)},
         )
 
@@ -315,14 +331,15 @@ class CouncilService:
         async def on_delta(delta: str) -> None:
             await self._emit(stream, "opinion_token", {"model_id": route.id, "delta": delta})
 
-        use_stream = stream is not None and route.supports_streaming
+        allowed = {name: self.tool_registry[name] for name in tools if name in self.tool_registry}
+        # Stream only on the default no-tool path; a multi-turn tool loop would emit
+        # superseded intermediate tokens.
+        use_stream = stream is not None and route.supports_streaming and not allowed
         try:
-            content, usage, latency_ms = await self._complete(
-                adapter, route, messages, on_delta if use_stream else None
+            content, usage, latency_ms, tool_results = await self._run_opinion_with_tools(
+                adapter, route, messages, allowed, on_delta if use_stream else None
             )
-            allowed = {name: self.tool_registry[name] for name in tools if name in self.tool_registry}
-            content_with_tools, tool_results = await inject_tool_results(content, allowed)
-            return _parse_opinion(route, role, content_with_tools, latency_ms, usage, tool_results)
+            return _parse_opinion(route, role, content, latency_ms, usage, tool_results)
         except Exception as exc:
             return AgentOpinion(
                 model_id=route.id,
@@ -333,24 +350,70 @@ class CouncilService:
                 error=str(exc),
             )
 
+    async def _run_opinion_with_tools(
+        self,
+        adapter: ProviderAdapter,
+        route: ModelRoute,
+        messages: list[ChatMessage],
+        allowed: dict,
+        on_delta,
+    ) -> tuple[str, object, int, list[ToolResult]]:
+        """Agentic loop: run tools and feed their results back so they inform the answer.
+
+        With no tools available this is a single completion (default behaviour unchanged).
+        """
+        tool_results: list[ToolResult] = []
+        content, usage, latency_total = "", None, 0
+        working = list(messages)
+        for _ in range(self.max_tool_iterations):
+            content, call_usage, latency_ms = await self._complete(adapter, route, working, on_delta)
+            latency_total += latency_ms or 0
+            usage = call_usage or usage
+            if not allowed:
+                break
+            _, results = await inject_tool_results(content, allowed)
+            if not results:
+                break
+            tool_results.extend(results)
+            # A response that already carries its structured block is final, even if it
+            # also issued tool calls (the common single-shot pattern).
+            if "COUNCIL_OUTPUT" in content:
+                break
+            result_block = "\n".join(
+                f"TOOL_RESULT: {r.tool} => {r.result if r.success else 'FAILED: ' + (r.error or 'unknown')}"
+                for r in results
+            )
+            working.append(ChatMessage(role="assistant", content=content))
+            working.append(ChatMessage(
+                role="user",
+                content=(
+                    f"{result_block}\n\nUse these tool results. If you need more tools, call them the "
+                    "same way; otherwise give your final answer ending with the COUNCIL_OUTPUT block."
+                ),
+            ))
+        return content, usage, latency_total, tool_results
+
     # ------------------------------------------------------------------
     # Stage 2 — Cross-Model Critique (batch: one call per reviewer)
     # ------------------------------------------------------------------
 
     async def _stage2_critique(
         self, opinions: list[AgentOpinion], stream: CouncilEventStream | None
-    ) -> list[CouncilCritique]:
+    ) -> tuple[list[CouncilCritique], list[UsageMetadata]]:
         roles = critique_roles(len(opinions))
         labels = [chr(65 + i) for i in range(len(opinions))]  # A, B, C, …
 
-        async def review_all(reviewer: AgentOpinion, critique_role: str) -> list[CouncilCritique]:
+        async def review_all(
+            reviewer: AgentOpinion, critique_role: str
+        ) -> tuple[list[CouncilCritique], UsageMetadata | None]:
             targets = [o for o in opinions if o.model_id != reviewer.model_id]
             target_labels = [labels[opinions.index(o)] for o in targets]
             anonymized_map = {f"Agent {label}": t.model_id for label, t in zip(target_labels, targets)}
 
             route = self._route_or_raise(reviewer.model_id)
+            usage: UsageMetadata | None = None
             try:
-                content, _, latency_ms = await self.adapters[route.provider].complete(
+                content, usage, latency_ms = await self.adapters[route.provider].complete(
                     route,
                     [
                         ChatMessage(
@@ -362,6 +425,7 @@ class CouncilService:
                             content=build_critique_prompt(critique_role, reviewer, targets, anonymized_map),
                         ),
                     ],
+                    json_mode=True,
                 )
                 batch = _parse_batch_critique(
                     reviewer, critique_role, targets, anonymized_map, content, latency_ms
@@ -382,12 +446,14 @@ class CouncilService:
 
             for critique in batch:
                 await self._emit(stream, "critique_scored", critique.model_dump())
-            return batch
+            return batch, usage
 
         nested = await asyncio.gather(*(
             review_all(opinions[i], roles[i].value) for i in range(len(opinions))
         ))
-        return [item for group in nested for item in group]
+        critiques = [item for group, _ in nested for item in group]
+        usages = [usage for _, usage in nested if usage]
+        return critiques, usages
 
     # ------------------------------------------------------------------
     # Stage 4 — Leader Synthesis
@@ -412,6 +478,7 @@ class CouncilService:
                         content=_synthesis_prompt(request.prompt, plan, opinions, critiques, election),
                     ),
                 ],
+                json_mode=True,
             )
             return _parse_synthesis(leader, content, latency_ms, usage)
         except Exception as exc:
@@ -437,9 +504,17 @@ class CouncilService:
         if synthesis.status == "failed":
             return SynthesisValidation(status="failed", error=synthesis.error)
         validator_id = election.runner_up_model_id
+        # With a single eligible model the runner-up IS the leader; skip rather than let
+        # the synthesizer rubber-stamp its own work.
+        if validator_id == election.elected_model_id:
+            return SynthesisValidation(
+                status="completed",
+                verdict=None,
+                issues=["No independent validator available (single eligible model)."],
+            )
         validator = self._route_or_raise(validator_id)
         try:
-            content, _, latency_ms = await self.adapters[validator.provider].complete(
+            content, usage, latency_ms = await self.adapters[validator.provider].complete(
                 validator,
                 [
                     ChatMessage(
@@ -451,8 +526,10 @@ class CouncilService:
                         content=build_validation_prompt(synthesis, critiques, original_query),
                     ),
                 ],
+                json_mode=True,
             )
-            return parse_validation_result(content, validator.id, validator.display_name, latency_ms)
+            result = parse_validation_result(content, validator.id, validator.display_name, latency_ms)
+            return result.model_copy(update={"usage": usage})
         except Exception as exc:
             return SynthesisValidation(
                 validator_model_id=validator.id,
@@ -486,7 +563,7 @@ class CouncilService:
         prompt_text = build_reintegration_prompt(sub_runs, original_prompt, contradictions)
         started = time.perf_counter()
         try:
-            content, _, _ = await self.adapters[leader.provider].complete(
+            content, usage, _ = await self.adapters[leader.provider].complete(
                 leader,
                 [
                     ChatMessage(
@@ -495,14 +572,16 @@ class CouncilService:
                     ),
                     ChatMessage(role="user", content=prompt_text),
                 ],
+                json_mode=True,
             )
-            return parse_reintegration_result(
+            result = parse_reintegration_result(
                 content,
                 leader.id,
                 leader.display_name,
                 [r.id for r in sub_runs],
                 int((time.perf_counter() - started) * 1000),
             )
+            return result.model_copy(update={"usage": usage})
         except Exception as exc:
             return ReintegrationOutput(
                 model_id=leader.id,
@@ -775,7 +854,7 @@ def _synthesis_prompt(
 ) -> str:
     opinion_block = "\n\n".join(
         f"### {o.display_name} (role: {o.role}, status: {o.status})\n"
-        f"Content: {o.content[:1500]}\n"
+        f"Content: {o.content}\n"
         f"Confidence: {o.confidence}\n"
         f"Summary: {o.answer_summary or 'N/A'}"
         for o in opinions
@@ -847,10 +926,22 @@ def _extract_json(content: str) -> str:
     return match.group(0)
 
 
-def _sum_cost(items: list) -> float | None:
-    costs = [
-        item.usage.cost
-        for item in items
-        if getattr(item, "usage", None) and item.usage and item.usage.cost is not None
-    ]
+def _usages_of(*items) -> list[UsageMetadata]:
+    """Collect UsageMetadata from a mix of usage-bearing objects and lists of them."""
+    out: list[UsageMetadata] = []
+    for item in items:
+        objs = item if isinstance(item, list) else [item]
+        for obj in objs:
+            usage = getattr(obj, "usage", None)
+            if usage is not None:
+                out.append(usage)
+    return out
+
+
+def _sum_tokens(usages: list[UsageMetadata]) -> int:
+    return sum((u.total_tokens or 0) for u in usages)
+
+
+def _sum_cost(usages: list[UsageMetadata]) -> float | None:
+    costs = [u.cost for u in usages if u.cost is not None]
     return round(sum(costs), 6) if costs else None

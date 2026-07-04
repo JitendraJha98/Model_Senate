@@ -46,9 +46,9 @@ The original pipeline. A fixed "leader" model is pre-designated by the caller.
 The newer pipeline. The leader is elected dynamically based on scored performance.
 
 0. **Stage 0 — Orchestration:** `orchestrator.py` calls a designated orchestrator model (or falls back to heuristics) to classify the query type (`factual`, `analytical`, `code`, `ethics`, `creative`, `multi_part`) and assign each model a role from `backend/roles.py` (e.g. Fact Verifier, Devil's Advocate, Code Verifier). Tool assignments are derived from roles.
-1. **Stage 1 — First Opinions:** Models respond in their assigned roles. Each response is parsed into a structured JSON opinion (`answer`, `confidence`, `key_claims`, `assumptions`, `uncertainties`). Parse failures fall back to raw content with `status="parse_failed"`. Tool calls embedded in model output (`TOOL_CALL: <name>: <input>`) are executed via `backend/tools.py` and results appended to the opinion.
+1. **Stage 1 — First Opinions:** Models respond in their assigned roles. Each response is parsed into a structured JSON opinion (`answer`, `confidence`, `key_claims`, `assumptions`, `uncertainties`). Parse failures fall back to raw content with `status="parse_failed"`. When tools are assigned, Stage 1 runs an agentic loop (`CouncilService._run_opinion_with_tools`): tool calls embedded in model output (`TOOL_CALL: <name>: <input>`) are executed via `backend/tools.py` and the results are fed back to the model on the next turn (capped by `COUNCIL_MAX_TOOL_ITERATIONS`) so they inform the final answer.
 2. **Stage 2 — Critique:** Every successful model critiques every other model's opinion, producing `CritiqueScore` (accuracy/logic/completeness/calibration). Critique roles rotate across `CritiqueRole` variants.
-3. **Stage 3 — Leader Election:** `backend/election.py` scores each candidate as: `score = (rank_score × 0.6) + (calibration_score × 0.25) + (tool_verification_score × 0.15)`. Elects a leader and a backup validator.
+3. **Stage 3 — Leader Election:** `backend/election.py` scores each candidate as `score = (rank_score × w_rank) + (calibration_score × w_cal) + (tool_verification_ratio × w_tool)`. Base weights are `(0.40, 0.30, 0.30)`; when no candidate produced verifiable claims the tool dimension is inactive and its weight is redistributed across rank and calibration. A cleanly-parsed opinion outranks a `parse_failed` one for leadership. Elects a leader and a backup validator.
 4. **Stage 4 — Synthesis:** The elected leader synthesizes all opinions and critiques into structured JSON (`direct_answer`, `consensus`, `dissent`, `unresolved`, `confidence_grade`, `provenance`). Retries with the validator model if synthesis fails.
 5. **Stage 5 — Validation:** The validator model checks the synthesis against the original query and critique flags, returning `approved`, `approved_with_caveats`, or `flagged`.
 
@@ -111,8 +111,9 @@ Copy `.env.example` to `.env` and populate API keys. OpenRouter is the primary p
 | `ORCHESTRATOR_MODEL_ID` | `openrouter-gpt-5-2` | Model used for Council Stage 0 |
 | `COUNCIL_MIN_MODELS` | `2` | Minimum models required for a Council run |
 | `COUNCIL_SYNTHESIS_RETRY_ON_FAILURE` | `true` | Retry synthesis with validator if leader fails |
+| `COUNCIL_MAX_TOOL_ITERATIONS` | `3` | Max model turns per opinion when tools are used (results fed back each turn) |
 | `TOOL_CODE_EXECUTOR_ENABLED` | `false` | Enable sandboxed Python code execution tool |
-| `TOOL_WEB_SEARCH_ENABLED` | `false` | Enable web search tool (no provider implemented yet) |
+| `TOOL_WEB_SEARCH_ENABLED` | `false` | Enable web search tool (Tavily/Serper/Brave providers in `backend/tools.py`) |
 
 Custom model routes can be injected via `MODEL_SENATE_ROUTES` as a JSON array of `ModelRoute` objects, overriding `DEFAULT_ROUTES` entirely.
 

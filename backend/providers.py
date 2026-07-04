@@ -39,7 +39,9 @@ class ProviderAdapter(ABC):
         return self.api_key
 
     @abstractmethod
-    async def complete(self, route: ModelRoute, messages: list[ChatMessage]) -> tuple[str, UsageMetadata | None, int]:
+    async def complete(
+        self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False
+    ) -> tuple[str, UsageMetadata | None, int]:
         raise NotImplementedError
 
     async def complete_streamed(
@@ -86,10 +88,18 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         self.base_url = base_url.rstrip("/")
         self.app_title = app_title
 
-    async def complete(self, route: ModelRoute, messages: list[ChatMessage]) -> tuple[str, UsageMetadata | None, int]:
+    async def complete(
+        self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False
+    ) -> tuple[str, UsageMetadata | None, int]:
         api_key = self.ensure_key()
         started = time.perf_counter()
-        payload = {"model": route.model, "messages": [m.model_dump() for m in messages]}
+        payload: dict[str, Any] = {
+            "model": route.model,
+            "messages": [m.model_dump() for m in messages],
+            **_openai_gen_params(route),
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -120,6 +130,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "messages": [m.model_dump() for m in messages],
             "stream": True,
             "stream_options": {"include_usage": True},
+            **_openai_gen_params(route),
         }
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -161,14 +172,28 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
 
 class AnthropicAdapter(ProviderAdapter):
-    async def complete(self, route: ModelRoute, messages: list[ChatMessage]) -> tuple[str, UsageMetadata | None, int]:
+    async def complete(
+        self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False
+    ) -> tuple[str, UsageMetadata | None, int]:
         api_key = self.ensure_key()
         started = time.perf_counter()
         system = "\n\n".join(m.content for m in messages if m.role == "system")
         anthropic_messages = [
             {"role": m.role, "content": m.content} for m in messages if m.role in {"user", "assistant"}
         ]
-        payload: dict[str, Any] = {"model": route.model, "max_tokens": 4096, "messages": anthropic_messages}
+        # Anthropic has no JSON flag; prefilling an assistant "{" forces the reply to
+        # start a JSON object, which we re-attach to the response below.
+        if json_mode:
+            anthropic_messages = anthropic_messages + [{"role": "assistant", "content": "{"}]
+        payload: dict[str, Any] = {
+            "model": route.model,
+            "max_tokens": route.max_tokens or 4096,
+            "messages": anthropic_messages,
+        }
+        if route.temperature is not None:
+            payload["temperature"] = route.temperature
+        if route.top_p is not None:
+            payload["top_p"] = route.top_p
         if system:
             payload["system"] = system
         headers = {
@@ -184,6 +209,8 @@ class AnthropicAdapter(ProviderAdapter):
             raise ProviderError(f"anthropic returned {response.status_code}: {response.text[:500]}")
         data = response.json()
         content = "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
+        if json_mode:
+            content = "{" + content
         usage_data = data.get("usage") or {}
         usage = UsageMetadata(
             prompt_tokens=usage_data.get("input_tokens"),
@@ -194,11 +221,31 @@ class AnthropicAdapter(ProviderAdapter):
 
 
 class GoogleAdapter(ProviderAdapter):
-    async def complete(self, route: ModelRoute, messages: list[ChatMessage]) -> tuple[str, UsageMetadata | None, int]:
+    async def complete(
+        self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False
+    ) -> tuple[str, UsageMetadata | None, int]:
         api_key = self.ensure_key()
         started = time.perf_counter()
-        prompt = "\n\n".join(f"{m.role.upper()}: {m.content}" for m in messages)
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        system = "\n\n".join(m.content for m in messages if m.role == "system")
+        contents = [
+            {"role": "model" if m.role == "assistant" else "user", "parts": [{"text": m.content}]}
+            for m in messages
+            if m.role in {"user", "assistant"}
+        ]
+        payload: dict[str, Any] = {"contents": contents}
+        if system:
+            payload["systemInstruction"] = {"parts": [{"text": system}]}
+        gen_config: dict[str, Any] = {}
+        if route.temperature is not None:
+            gen_config["temperature"] = route.temperature
+        if route.top_p is not None:
+            gen_config["topP"] = route.top_p
+        if route.max_tokens is not None:
+            gen_config["maxOutputTokens"] = route.max_tokens
+        if json_mode:
+            gen_config["responseMimeType"] = "application/json"
+        if gen_config:
+            payload["generationConfig"] = gen_config
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{route.model}:generateContent?key={api_key}"
         response = await self._send(lambda client: client.post(url, json=payload))
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -232,6 +279,20 @@ def build_adapters(settings: Any) -> dict[str, ProviderAdapter]:
         "anthropic": AnthropicAdapter(settings.anthropic_api_key, **opts),
         "google": GoogleAdapter(settings.google_api_key, **opts),
     }
+
+
+def _openai_gen_params(route: ModelRoute) -> dict[str, Any]:
+    """Optional generation controls, omitted when None so provider defaults are preserved."""
+    params: dict[str, Any] = {}
+    if route.temperature is not None:
+        params["temperature"] = route.temperature
+    if route.top_p is not None:
+        params["top_p"] = route.top_p
+    if route.max_tokens is not None:
+        params["max_tokens"] = route.max_tokens
+    if route.seed is not None:
+        params["seed"] = route.seed
+    return params
 
 
 def _usage_from_openai_compatible(usage: dict[str, Any] | None) -> UsageMetadata | None:

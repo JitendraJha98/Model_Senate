@@ -69,3 +69,35 @@ def test_election_single_model_is_both_winner_and_runner_up():
 
     assert election.elected_model_id == "m1"
     assert election.runner_up_model_id == "m1"
+
+
+def test_election_redistributes_tool_weight_when_no_verifiable_claims():
+    # No candidate has verifiable claims, so the tool dimension must not drag scores down.
+    opinions = [_opinion("m1", "One", confidence=0.9), _opinion("m2", "Two", confidence=0.9)]
+    critiques = [
+        _critique("m2", "m1", "One", accuracy=0.9, rank=1),
+        _critique("m1", "m2", "Two", accuracy=0.9, rank=1),
+    ]
+
+    election = elect_leader(opinions, critiques)
+
+    assert election.score_breakdown["m1"]["tool_dimension_active"] == 0.0
+    # Perfect rank + calibration and no dead tool weight → near-perfect score.
+    assert election.all_scores["m1"] > 0.9
+
+
+def test_election_prefers_parsed_opinion_for_leadership():
+    # m2 scores higher, but only m1 returned a clean structured opinion; the synthesizer
+    # must be able to emit structured output, so m1 is elected.
+    parsed = _opinion("m1", "One", confidence=0.5)
+    parsed.structured_output_parsed = True
+    unparsed = _opinion("m2", "Two", confidence=0.9)
+    unparsed.structured_output_parsed = False
+    critiques = [
+        _critique("m2", "m1", "One", accuracy=0.3, rank=2),
+        _critique("m1", "m2", "Two", accuracy=0.9, rank=1),
+    ]
+
+    election = elect_leader([parsed, unparsed], critiques)
+
+    assert election.elected_model_id == "m1"

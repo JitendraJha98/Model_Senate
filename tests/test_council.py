@@ -5,6 +5,7 @@ import pytest
 from backend.council import CouncilService
 from backend.schemas import ChatMessage, CouncilRequest, ModelRoute, UsageMetadata
 from backend.storage import ConversationStore
+from backend.tools import CalculatorTool
 
 
 ORCHESTRATOR_PLAN = (
@@ -42,7 +43,7 @@ VALIDATION_RESPONSE = (
 
 
 class FakeAdapter:
-    async def complete(self, route: ModelRoute, messages: list[ChatMessage]):
+    async def complete(self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False):
         system = messages[0].content if messages else ""
         if "orchestration agent" in system:
             return ORCHESTRATOR_PLAN, UsageMetadata(total_tokens=10), 5
@@ -125,7 +126,7 @@ class MultiPartAdapter:
     def __init__(self):
         self._plan_served = False
 
-    async def complete(self, route: ModelRoute, messages: list[ChatMessage]):
+    async def complete(self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False):
         system = messages[0].content if messages else ""
         if "orchestration agent" in system:
             if not self._plan_served:
@@ -164,9 +165,91 @@ async def test_council_multi_part_reintegrates_sub_runs(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_council_totals_count_every_stage(tmp_path: Path):
+    # 2 opinions + 2 critiques + synthesis + validation + orchestration = 7 calls × 10 tokens.
+    service = CouncilService(
+        routes=routes(),
+        adapters={"openrouter": FakeAdapter()},
+        store=ConversationStore(tmp_path),
+        tool_registry={},
+        orchestrator_model_id="m1",
+    )
+
+    run = await service.run(CouncilRequest(prompt="Compare options", selected_model_ids=["m1", "m2"]))
+
+    assert run.total_tokens == 70
+
+
+class ToolThenAnswerAdapter:
+    """First response asks for a tool; the second (after seeing TOOL_RESULT) answers."""
+
+    def __init__(self):
+        self.calls: list[list[ChatMessage]] = []
+
+    async def complete(self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False):
+        self.calls.append(messages)
+        if len(self.calls) == 1:
+            return 'Let me check. TOOL_CALL: {"tool": "calculator", "expression": "6*7"}', UsageMetadata(total_tokens=5), 3
+        return (
+            'The answer is 42.\n\nCOUNCIL_OUTPUT:\n'
+            '{"answer_summary":"42","confidence":0.9,"key_claims":[],"uncertainties":[]}',
+            UsageMetadata(total_tokens=5),
+            3,
+        )
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_feeds_results_back(tmp_path: Path):
+    adapter = ToolThenAnswerAdapter()
+    route = routes()[0]
+    service = CouncilService(
+        routes=[route],
+        adapters={"openrouter": adapter},
+        store=ConversationStore(tmp_path),
+        tool_registry={"calculator": CalculatorTool()},
+        orchestrator_model_id="m1",
+    )
+
+    content, _, _, tool_results = await service._run_opinion_with_tools(
+        adapter, route, [ChatMessage(role="user", content="what is 6*7?")], {"calculator": CalculatorTool()}, None
+    )
+
+    assert len(adapter.calls) == 2  # a second turn happened after the tool ran
+    assert any("TOOL_RESULT: calculator => 42" in m.content for m in adapter.calls[1])
+    assert any(r.tool == "calculator" and r.success for r in tool_results)
+    assert "COUNCIL_OUTPUT" in content
+
+
+@pytest.mark.asyncio
+async def test_no_tools_is_a_single_call(tmp_path: Path):
+    class OneShotAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, route, messages, *, json_mode: bool = False):
+            self.calls += 1
+            return "answer\n\nCOUNCIL_OUTPUT:\n{}", UsageMetadata(total_tokens=5), 1
+
+    adapter = OneShotAdapter()
+    route = routes()[0]
+    service = CouncilService(
+        routes=[route],
+        adapters={"openrouter": adapter},
+        store=ConversationStore(tmp_path),
+        tool_registry={},
+        orchestrator_model_id="m1",
+    )
+
+    await service._run_opinion_with_tools(
+        adapter, route, [ChatMessage(role="user", content="hi")], {}, None
+    )
+    assert adapter.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_council_all_stage1_fail_returns_failed_run(tmp_path: Path):
     class AlwaysFailAdapter:
-        async def complete(self, route, messages):
+        async def complete(self, route, messages, *, json_mode: bool = False):
             raise RuntimeError("Provider down")
 
     service = CouncilService(

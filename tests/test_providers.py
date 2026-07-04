@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -64,6 +65,46 @@ async def test_complete_streamed_collects_deltas():
     assert content == "Hello"
     assert deltas == ["Hel", "lo"]
     assert usage is not None and usage.total_tokens == 3
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_json_mode_and_generation_params_reach_payload():
+    captured: dict = {}
+
+    def handler(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=_ok_body())
+
+    respx.post("https://api.openai.com/v1/chat/completions").mock(side_effect=handler)
+    route = ModelRoute(
+        id="m", provider="openrouter", model="x", display_name="X",
+        missing_key=False, temperature=0, max_tokens=256, seed=7,
+    )
+    adapter = OpenAICompatibleAdapter("key", "https://api.openai.com/v1")
+    await adapter.complete(route, MESSAGES, json_mode=True)
+
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["temperature"] == 0
+    assert captured["max_tokens"] == 256
+    assert captured["seed"] == 7
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_generation_params_omitted_when_unset():
+    captured: dict = {}
+
+    def handler(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=_ok_body())
+
+    respx.post("https://api.openai.com/v1/chat/completions").mock(side_effect=handler)
+    adapter = OpenAICompatibleAdapter("key", "https://api.openai.com/v1")
+    await adapter.complete(ROUTE, MESSAGES)  # ROUTE has no generation params
+
+    assert "temperature" not in captured
+    assert "response_format" not in captured
 
 
 @respx.mock
