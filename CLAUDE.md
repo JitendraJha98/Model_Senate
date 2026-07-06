@@ -109,6 +109,7 @@ Abstract base `ProviderAdapter` with a single async `complete()` method. Concret
 | `tools.py` | `CalculatorTool`, `CodeExecutorTool`, `WebSearchTool`; `inject_tool_results()`; `build_tool_registry()` (with `force_web_search`/`force_code_executor` overrides for harness/verifier) |
 | `pricing.py` | `PRICE_TABLE` + `estimate_cost()` — per-model USD cost estimate so every provider reports cost, not just OpenRouter |
 | `calibration.py` | `load_calibration_map()` / `calibrated_probability()` — map a confidence grade to a *measured* probability from the harness-fitted `eval/calibration.json` (falls back to defaults) |
+| `doctor.py` | `run_doctor()` provider preflight (one tiny generation per provider); CLI `python -m backend.doctor` + `GET /api/health/deep` |
 | `eval/` | Evaluation harness package: `datasets.py` (`EvalItem`, `load_suite`), `scorers.py` (exact/math/code/llm-judge), `metrics.py` (accuracy/win-rate/ECE/calibration), `baselines.py` (`run_config` for single/self-consistency/senate/council + ablations), `harness.py` (`run_eval`→`EvalReport`), `report.py` (leaderboard md/json), `run.py` (CLI); `data/*.jsonl` committed fixtures |
 | `streaming.py` | `CouncilEventStream` (asyncio queue) and `active_streams` registry |
 | `storage.py` | `ConversationStore` reads/writes JSON under `data/conversations/` |
@@ -125,6 +126,7 @@ Abstract base `ProviderAdapter` with a single async `complete()` method. Concret
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/health` | Liveness check |
+| GET | `/api/health/deep` | Preflight: tiny generation per provider; reports reachable routes (also `python -m backend.doctor`) |
 | GET | `/api/config` | Available models + defaults for both pipelines |
 | POST | `/api/senate/run` | Execute Senate pipeline; returns `SenateRun` synchronously |
 | GET | `/api/conversations` | List past Senate runs (sorted newest-first) |

@@ -81,6 +81,16 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/health/deep")
+async def health_deep() -> dict:
+    """Preflight: tiny generation against each provider; reports reachable routes."""
+    from backend.doctor import run_doctor
+
+    results = await run_doctor(routes, adapters)
+    reachable = sum(1 for r in results if r["ok"])
+    return {"status": "ok" if reachable else "degraded", "reachable": reachable, "routes": results}
+
+
 @app.get("/api/config", response_model=AppConfigResponse)
 async def get_config() -> AppConfigResponse:
     openrouter_models = [route.id for route in routes if route.provider == "openrouter"]
