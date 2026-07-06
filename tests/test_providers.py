@@ -109,6 +109,41 @@ async def test_generation_params_omitted_when_unset():
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_route_base_url_overrides_and_needs_no_key():
+    # Local server (Ollama-style): per-route base_url, adapter constructed with no key.
+    captured_headers: dict = {}
+
+    def handler(request):
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json=_ok_body())
+
+    local = respx.post("http://localhost:11434/v1/chat/completions").mock(side_effect=handler)
+    route = ModelRoute(
+        id="local", provider="openai", model="llama3", display_name="Local Llama",
+        base_url="http://localhost:11434/v1",
+    )
+    adapter = OpenAICompatibleAdapter(None, "https://api.openai.com/v1")  # no key
+    content, _, _ = await adapter.complete(route, MESSAGES)
+
+    assert content == "hello"
+    assert local.call_count == 1  # hit the override, not the default endpoint
+    assert "authorization" not in {k.lower() for k in captured_headers}
+
+
+@pytest.mark.asyncio
+async def test_base_url_route_is_not_marked_missing_key():
+    from backend.config import Settings, load_model_routes
+
+    settings = Settings(model_senate_routes=(
+        '[{"id":"local","provider":"openai","model":"llama3",'
+        '"display_name":"Local","base_url":"http://localhost:11434/v1"}]'
+    ))
+    routes = load_model_routes(settings)
+    assert routes[0].missing_key is False  # available despite no OPENAI_API_KEY
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_semaphore_caps_concurrency():
     in_flight = 0
     peak = 0

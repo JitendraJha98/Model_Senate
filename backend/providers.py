@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from backend.pricing import estimate_cost
 from backend.schemas import ChatMessage, ModelRoute, UsageMetadata
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -91,7 +92,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     async def complete(
         self, route: ModelRoute, messages: list[ChatMessage], *, json_mode: bool = False
     ) -> tuple[str, UsageMetadata | None, int]:
-        api_key = self.ensure_key()
+        # Local OpenAI-compatible servers (Ollama/LM Studio/vLLM) need no key.
+        base_url = (route.base_url or self.base_url).rstrip("/")
+        api_key = self.api_key if route.base_url else self.ensure_key()
         started = time.perf_counter()
         payload: dict[str, Any] = {
             "model": route.model,
@@ -100,21 +103,16 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:5173",
-            "X-OpenRouter-Title": self.app_title,
-        }
+        headers = _openai_headers(api_key, self.app_title)
         response = await self._send(
-            lambda client: client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
+            lambda client: client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
         if response.status_code >= 400:
             raise ProviderError(f"{route.provider} returned {response.status_code}: {response.text[:500]}")
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        usage = _usage_from_openai_compatible(data.get("usage"))
+        usage = _usage_from_openai_compatible(data.get("usage"), route.model)
         return content, usage, latency_ms
 
     async def complete_streamed(
@@ -123,7 +121,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         messages: list[ChatMessage],
         on_delta: Callable[[str], Awaitable[None]] | None,
     ) -> tuple[str, UsageMetadata | None, int]:
-        api_key = self.ensure_key()
+        base_url = (route.base_url or self.base_url).rstrip("/")
+        api_key = self.api_key if route.base_url else self.ensure_key()
         started = time.perf_counter()
         payload = {
             "model": route.model,
@@ -132,18 +131,13 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "stream_options": {"include_usage": True},
             **_openai_gen_params(route),
         }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:5173",
-            "X-OpenRouter-Title": self.app_title,
-        }
+        headers = _openai_headers(api_key, self.app_title)
         parts: list[str] = []
         usage: UsageMetadata | None = None
         async with self.semaphore:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 async with client.stream(
-                    "POST", f"{self.base_url}/chat/completions", json=payload, headers=headers
+                    "POST", f"{base_url}/chat/completions", json=payload, headers=headers
                 ) as response:
                     if response.status_code >= 400:
                         body = (await response.aread()).decode(errors="replace")[:500]
@@ -166,7 +160,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                                 if on_delta:
                                     await on_delta(delta)
                         if chunk.get("usage"):
-                            usage = _usage_from_openai_compatible(chunk["usage"])
+                            usage = _usage_from_openai_compatible(chunk["usage"], route.model)
         latency_ms = int((time.perf_counter() - started) * 1000)
         return "".join(parts), usage, latency_ms
 
@@ -212,10 +206,13 @@ class AnthropicAdapter(ProviderAdapter):
         if json_mode:
             content = "{" + content
         usage_data = data.get("usage") or {}
+        prompt_tokens = usage_data.get("input_tokens")
+        completion_tokens = usage_data.get("output_tokens")
         usage = UsageMetadata(
-            prompt_tokens=usage_data.get("input_tokens"),
-            completion_tokens=usage_data.get("output_tokens"),
-            total_tokens=(usage_data.get("input_tokens") or 0) + (usage_data.get("output_tokens") or 0),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=(prompt_tokens or 0) + (completion_tokens or 0),
+            cost=estimate_cost(route.model, prompt_tokens, completion_tokens),
         )
         return content, usage, latency_ms
 
@@ -255,10 +252,13 @@ class GoogleAdapter(ProviderAdapter):
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         content = "".join(part.get("text", "") for part in parts)
         usage_data = data.get("usageMetadata") or {}
+        prompt_tokens = usage_data.get("promptTokenCount")
+        completion_tokens = usage_data.get("candidatesTokenCount")
         usage = UsageMetadata(
-            prompt_tokens=usage_data.get("promptTokenCount"),
-            completion_tokens=usage_data.get("candidatesTokenCount"),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             total_tokens=usage_data.get("totalTokenCount"),
+            cost=estimate_cost(route.model, prompt_tokens, completion_tokens),
         )
         return content, usage, latency_ms
 
@@ -281,6 +281,18 @@ def build_adapters(settings: Any) -> dict[str, ProviderAdapter]:
     }
 
 
+def _openai_headers(api_key: str | None, app_title: str) -> dict[str, str]:
+    """OpenAI-compatible headers; Authorization is omitted for keyless local endpoints."""
+    headers = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:5173",
+        "X-OpenRouter-Title": app_title,
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
 def _openai_gen_params(route: ModelRoute) -> dict[str, Any]:
     """Optional generation controls, omitted when None so provider defaults are preserved."""
     params: dict[str, Any] = {}
@@ -295,12 +307,18 @@ def _openai_gen_params(route: ModelRoute) -> dict[str, Any]:
     return params
 
 
-def _usage_from_openai_compatible(usage: dict[str, Any] | None) -> UsageMetadata | None:
+def _usage_from_openai_compatible(usage: dict[str, Any] | None, model: str) -> UsageMetadata | None:
     if not usage:
         return None
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    # OpenRouter reports real cost; direct OpenAI/xAI/Groq don't, so estimate from tokens.
+    cost = usage.get("cost")
+    if cost is None:
+        cost = estimate_cost(model, prompt_tokens, completion_tokens)
     return UsageMetadata(
-        prompt_tokens=usage.get("prompt_tokens"),
-        completion_tokens=usage.get("completion_tokens"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
         total_tokens=usage.get("total_tokens"),
-        cost=usage.get("cost"),
+        cost=cost,
     )
