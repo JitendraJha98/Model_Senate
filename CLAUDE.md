@@ -96,6 +96,7 @@ Abstract base `ProviderAdapter` with a single async `complete()` method. Concret
 |--------|------|
 | `main.py` | FastAPI app, CORS, all REST endpoints, global singletons |
 | `facade.py` | OpenAI-compatible `/v1/chat/completions` facade — maps chat requests to a Council run and back to a chat completion (`OAIChatRequest`, `messages_to_prompt`, `to_chat_completion`, `to_stream_chunks`) |
+| `mcp_server.py` | MCP server exposing `consult_council` so agents can convene the council; core `consult_council()` coroutine is dependency-free/testable, `main()` lazily loads the optional `mcp` SDK. Run: `python -m backend.mcp_server` (or `model-council-mcp`) |
 | `config.py` | `Settings` (pydantic-settings, reads `.env`), `DEFAULT_ROUTES`, `load_model_routes()` |
 | `schemas.py` | All Pydantic DTOs; `SenateRun` and `CouncilRun` are the top-level outputs |
 | `senate.py` | `SenateService` — original 3-stage pipeline |

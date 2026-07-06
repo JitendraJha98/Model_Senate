@@ -13,8 +13,13 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
 ]
 
+[project.optional-dependencies]
+# MCP server (`consult_council` tool). Install with: uv sync --extra mcp
+mcp = ["mcp>=1.2.0"]
+
 [project.scripts]
 model-senate = "backend.cli:main"
+model-council-mcp = "backend.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
