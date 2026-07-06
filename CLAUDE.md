@@ -84,6 +84,7 @@ Abstract base `ProviderAdapter` with a single async `complete()` method. Concret
 | Module | Role |
 |--------|------|
 | `main.py` | FastAPI app, CORS, all REST endpoints, global singletons |
+| `facade.py` | OpenAI-compatible `/v1/chat/completions` facade — maps chat requests to a Council run and back to a chat completion (`OAIChatRequest`, `messages_to_prompt`, `to_chat_completion`, `to_stream_chunks`) |
 | `config.py` | `Settings` (pydantic-settings, reads `.env`), `DEFAULT_ROUTES`, `load_model_routes()` |
 | `schemas.py` | All Pydantic DTOs; `SenateRun` and `CouncilRun` are the top-level outputs |
 | `senate.py` | `SenateService` — original 3-stage pipeline |
@@ -119,6 +120,7 @@ Abstract base `ProviderAdapter` with a single async `complete()` method. Concret
 | GET | `/api/council/run/{run_id}/stream` | SSE stream of Council pipeline events |
 | GET | `/api/council/run/{run_id}` | Retrieve completed Council run |
 | GET | `/api/council/runs` | List past Council runs (newest-first, capped at 100) |
+| POST | `/v1/chat/completions` (also `/api/v1/...`) | OpenAI-compatible facade: runs the Council and returns the synthesis as a chat completion (supports `stream`); council metadata under `x_council` |
 
 ### Environment / API Keys
 

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import get_settings, load_model_routes
 from backend.council import CouncilService
+from backend.facade import (
+    OAIChatRequest,
+    council_answer,
+    messages_to_prompt,
+    to_chat_completion,
+    to_stream_chunks,
+)
 from backend.providers import build_adapters
 from backend.schemas import AppConfigResponse, CouncilRequest, CouncilRun, SenateRequest, SenateRun
 from backend.senate import SenateService
@@ -136,6 +144,33 @@ async def get_conversation(run_id: str) -> SenateRun:
     if not run:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return run
+
+
+@app.post("/v1/chat/completions")
+@app.post("/api/v1/chat/completions")
+async def openai_chat_completions(request: OAIChatRequest):
+    """OpenAI-compatible endpoint: run the Council, return the synthesis as a completion."""
+    prompt, system_context = messages_to_prompt(request.messages)
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="No user message provided")
+    model_ids = [route.id for route in routes if not route.missing_key]
+    if len(model_ids) < settings.council_min_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least {settings.council_min_models} available models; {len(model_ids)} configured",
+        )
+    run = await council_service.run(
+        CouncilRequest(prompt=prompt, selected_model_ids=model_ids, system_context=system_context)
+    )
+    answer = council_answer(run)
+    if request.stream:
+        async def event_stream():
+            for chunk in to_stream_chunks(run, request.model, answer):
+                yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return JSONResponse(to_chat_completion(run, request.model, answer))
 
 
 def _frontend_dir() -> Path | None:
