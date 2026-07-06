@@ -44,6 +44,17 @@ npm test             # Run Vitest tests
 
 Both servers must run simultaneously during development. The frontend Vite config proxies all `/api/*` requests to `http://127.0.0.1:8001`.
 
+### Docker
+```bash
+cp .env.example .env   # then populate keys
+docker compose up --build   # backend + bundled UI on http://localhost:8001
+```
+
+### CI
+`.github/workflows/ci.yml` runs backend `pytest` + frontend build/test on every push/PR.
+`.github/workflows/publish.yml` builds the wheel (UI bundled) and publishes to PyPI on a
+`v*` tag (needs a PyPI Trusted Publisher configured).
+
 ## Architecture
 
 This project hosts **two parallel consensus pipelines**: the original **Model Senate** and the newer **Model Council**. Both share the same providers, storage, and routes but differ in pipeline design and output schemas.
