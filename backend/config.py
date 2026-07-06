@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     council_min_models: int = 2
     council_synthesis_retry_on_failure: bool = True
     council_max_tool_iterations: int = 3
+    council_debate_enabled: bool = True
+    council_debate_max_rounds: int = 2
+    council_debate_recritique: bool = True
+    council_debate_convergence: str = "self_report"  # or "answer_stable"
     provider_timeout_seconds: float = 90.0
     provider_max_retries: int = 2
     max_concurrent_requests: int = 8
@@ -115,7 +119,9 @@ def load_model_routes(settings: Settings) -> list[ModelRoute]:
     routes = _load_custom_routes(settings) or DEFAULT_ROUTES
     hydrated: list[ModelRoute] = []
     for route in routes:
-        hydrated.append(route.model_copy(update={"missing_key": not provider_has_key(settings, route.provider)}))
+        # A route with an explicit base_url (Ollama/LM Studio/vLLM) needs no API key.
+        missing = not route.base_url and not provider_has_key(settings, route.provider)
+        hydrated.append(route.model_copy(update={"missing_key": missing}))
     return hydrated
 
 

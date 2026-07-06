@@ -31,6 +31,10 @@ council_service = CouncilService(
     orchestrator_model_id=settings.orchestrator_model_id,
     synthesis_retry_on_failure=settings.council_synthesis_retry_on_failure,
     max_tool_iterations=settings.council_max_tool_iterations,
+    debate_enabled=settings.council_debate_enabled,
+    debate_max_rounds=settings.council_debate_max_rounds,
+    debate_recritique=settings.council_debate_recritique,
+    debate_convergence=settings.council_debate_convergence,
 )
 
 app = FastAPI(title="Model_Senate API", version="0.1.0")

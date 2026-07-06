@@ -50,6 +50,13 @@ class CouncilService:
         orchestrator_model_id: str,
         synthesis_retry_on_failure: bool = True,
         max_tool_iterations: int = 3,
+        *,
+        debate_enabled: bool = False,
+        debate_max_rounds: int = 2,
+        debate_recritique: bool = True,
+        debate_convergence: str = "self_report",
+        enable_critique: bool = True,
+        enable_election: bool = True,
     ):
         self.routes = {route.id: route for route in routes}
         self.adapters = adapters
@@ -58,6 +65,14 @@ class CouncilService:
         self.orchestrator_model_id = orchestrator_model_id
         self.synthesis_retry_on_failure = synthesis_retry_on_failure
         self.max_tool_iterations = max(1, max_tool_iterations)
+        # Debate + ablation controls. Defaults preserve the pre-debate pipeline so
+        # existing callers/tests are unchanged; the eval harness flips these per run.
+        self.debate_enabled = debate_enabled
+        self.debate_max_rounds = max(1, debate_max_rounds)
+        self.debate_recritique = debate_recritique
+        self.debate_convergence = debate_convergence
+        self.enable_critique = enable_critique
+        self.enable_election = enable_election
 
     async def run(
         self,
@@ -211,15 +226,27 @@ class CouncilService:
                 metadata={"pipeline": "model-council", "failure": "all_stage1_failed"},
             )
 
-        if len(successful) >= 2:
+        if self.enable_critique and len(successful) >= 2:
             critiques, critique_usages = await self._stage2_critique(successful, stream)
         else:
             critiques, critique_usages = [], []
 
-        election = elect_leader(successful, critiques)
+        # Stage 2.5 — Multi-round debate. Models revise given critiques + anonymized
+        # peers; election/synthesis then run on the FINAL (revised) opinions.
+        debate_rounds: list[list[AgentOpinion]] = []
+        debate_usages: list[UsageMetadata] = []
+        if self.debate_enabled and len(successful) >= 2:
+            successful, critiques, debate_rounds, debate_usages = await self._stage_debate(
+                successful, critiques, plan, request, stream
+            )
+
+        if self.enable_election:
+            election = elect_leader(successful, critiques)
+        else:
+            election = self._heuristic_election(successful)
         await self._emit(stream, "leader_elected", election.model_dump())
 
-        synthesis = await self._stage4_synthesize(election, plan, opinions, critiques, request)
+        synthesis = await self._stage4_synthesize(election, plan, successful, critiques, request)
         if synthesis.status == "failed" and self.synthesis_retry_on_failure:
             retry = election.model_copy(update={
                 "elected_model_id": election.runner_up_model_id,
@@ -231,7 +258,7 @@ class CouncilService:
         validation = await self._stage5_validate(election, synthesis, opinions, critiques, request.prompt)
         await self._emit(stream, "validation_result", validation.model_dump())
 
-        provenance = self._build_provenance_tree(synthesis, opinions, critiques)
+        provenance = self._build_provenance_tree(synthesis, successful, critiques)
         grade = synthesis.confidence_grade or self._compute_final_grade(synthesis, validation)
 
         errors = [
@@ -256,6 +283,7 @@ class CouncilService:
             orchestration_plan=plan,
             agent_opinions=opinions,
             council_critiques=critiques,
+            debate_rounds=debate_rounds,
             leader_election=election,
             synthesis=synthesis,
             validation=validation,
@@ -267,8 +295,12 @@ class CouncilService:
             selected_models=selected,
             errors=[e for e in errors if e],
             total_latency_ms=int((time.perf_counter() - started) * 1000),
-            total_tokens=_sum_tokens([*_usages_of(opinions, synthesis, validation, plan), *critique_usages]),
-            total_cost_usd=_sum_cost([*_usages_of(opinions, synthesis, validation, plan), *critique_usages]),
+            total_tokens=_sum_tokens(
+                [*_usages_of(opinions, synthesis, validation, plan), *critique_usages, *debate_usages]
+            ),
+            total_cost_usd=_sum_cost(
+                [*_usages_of(opinions, synthesis, validation, plan), *critique_usages, *debate_usages]
+            ),
             metadata={"pipeline": "model-council", "successful_first_opinions": len(successful)},
         )
 
@@ -454,6 +486,111 @@ class CouncilService:
         critiques = [item for group, _ in nested for item in group]
         usages = [usage for _, usage in nested if usage]
         return critiques, usages
+
+    # ------------------------------------------------------------------
+    # Stage 2.5 — Multi-round Debate / Revision
+    # ------------------------------------------------------------------
+
+    async def _stage_debate(
+        self,
+        successful: list[AgentOpinion],
+        critiques: list[CouncilCritique],
+        plan: OrchestrationPlan,
+        request: CouncilRequest,
+        stream: CouncilEventStream | None,
+    ) -> tuple[list[AgentOpinion], list[CouncilCritique], list[list[AgentOpinion]], list[UsageMetadata]]:
+        """Up to N revision rounds. Returns (final_opinions, final_critiques, rounds, usages).
+
+        Each model revises its own opinion given the critiques of it plus anonymized
+        peers. Stops early on convergence. Re-critique between rounds is config-gated.
+        Election runs later on whatever this returns as the final opinions.
+        """
+        rounds: list[list[AgentOpinion]] = []
+        usages: list[UsageMetadata] = []
+        current = successful
+        current_critiques = critiques
+        for round_num in range(1, self.debate_max_rounds + 1):
+            await self._emit(stream, "debate_round_started", {"round": round_num})
+            revised = list(await asyncio.gather(*(
+                self._revise_opinion(o, current, current_critiques, request, round_num, stream)
+                for o in current
+            )))
+            rounds.append(revised)
+            usages.extend(o.usage for o in revised if o.usage)
+            converged = self._debate_converged(current, revised)
+            current = revised
+            if converged:
+                await self._emit(stream, "debate_converged", {"round": round_num})
+                break
+            # Re-critique the revised opinions so the next round (and election) see fresh scores.
+            if self.debate_recritique and round_num < self.debate_max_rounds and len(current) >= 2:
+                current_critiques, recrit_usages = await self._stage2_critique(current, stream)
+                usages.extend(recrit_usages)
+        return current, current_critiques, rounds, usages
+
+    async def _revise_opinion(
+        self,
+        opinion: AgentOpinion,
+        all_opinions: list[AgentOpinion],
+        critiques: list[CouncilCritique],
+        request: CouncilRequest,
+        round_num: int,
+        stream: CouncilEventStream | None,
+    ) -> AgentOpinion:
+        route = self._route_or_raise(opinion.model_id)
+        adapter = self.adapters[route.provider]
+        own_critiques = [
+            c for c in critiques
+            if c.target_model_id == opinion.model_id and c.status == "completed"
+        ]
+        peers = [o for o in all_opinions if o.model_id != opinion.model_id]
+        messages = [
+            ChatMessage(role="system", content=_revision_system()),
+            ChatMessage(role="user", content=_revision_prompt(request.prompt, opinion, own_critiques, peers)),
+        ]
+        try:
+            content, usage, latency_ms = await adapter.complete(route, messages)
+            revised = _parse_opinion(route, opinion.role, content, latency_ms, usage, [])
+            # If the model gives no clear self-report, treat it as still-changing (keep debating).
+            changed = revised.changed if revised.changed is not None else True
+            revised = revised.model_copy(update={"revision_round": round_num, "changed": changed})
+            await self._emit(stream, "opinion_revised", revised.model_dump())
+            return revised
+        except Exception:
+            # A failed revision keeps the prior opinion and reports no change.
+            return opinion.model_copy(update={"revision_round": round_num, "changed": False})
+
+    def _debate_converged(self, prev: list[AgentOpinion], revised: list[AgentOpinion]) -> bool:
+        if self.debate_convergence == "answer_stable":
+            prev_by_id = {o.model_id: o for o in prev}
+            return all(
+                _norm_answer(prev_by_id.get(r.model_id)) == _norm_answer(r)
+                for r in revised
+            )
+        # self_report: converged only when every model explicitly reports no change.
+        return all(r.changed is False for r in revised)
+
+    def _heuristic_election(self, successful: list[AgentOpinion]) -> LeaderElection:
+        """Leader chosen without scoring (the `council_no_election` ablation).
+
+        Parsed-structured opinions first, then highest self-reported confidence.
+        """
+        ordered = sorted(
+            successful,
+            key=lambda o: (0 if o.structured_output_parsed else 1, -(o.confidence or 0.0), o.model_id),
+        )
+        winner = ordered[0]
+        runner_up = ordered[1] if len(ordered) > 1 else winner
+        return LeaderElection(
+            elected_model_id=winner.model_id,
+            elected_display_name=winner.display_name,
+            election_score=0.0,
+            runner_up_model_id=runner_up.model_id,
+            runner_up_display_name=runner_up.display_name,
+            runner_up_score=0.0,
+            all_scores={o.model_id: 0.0 for o in successful},
+            rationale="Heuristic leader (election ablated): most-structured, highest-confidence opinion.",
+        )
 
     # ------------------------------------------------------------------
     # Stage 4 — Leader Synthesis
@@ -703,6 +840,10 @@ def _parse_opinion(
                 except (TypeError, ValueError):
                     conf = None
 
+            # Debate self-report: only meaningful in revision rounds; absent in round 0.
+            changed_val = data.get("changed")
+            changed = changed_val if isinstance(changed_val, bool) else None
+
             return AgentOpinion(
                 model_id=route.id,
                 display_name=route.display_name,
@@ -717,6 +858,7 @@ def _parse_opinion(
                 uncertainties=list(data.get("uncertainties") or []),
                 tool_results=tool_results,
                 structured_output_parsed=True,
+                changed=changed,
                 latency_ms=latency_ms,
                 usage=usage,
             )
@@ -819,6 +961,71 @@ def _parse_batch_critique(
             latency_ms=latency_ms,
         ))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 2.5 (debate) prompt helpers
+# ---------------------------------------------------------------------------
+
+def _revision_system() -> str:
+    return """\
+You are revising your Model Council opinion after peer critique.
+
+Reconsider your answer in light of (a) the critiques of YOUR opinion and (b) your
+peers' anonymized opinions. Change your answer ONLY if the evidence or logic warrants
+it — do not cave to peer pressure, and do not change a well-supported answer. If a
+minority view is better supported, adopt it.
+
+Return your reasoning, then end with:
+COUNCIL_OUTPUT:
+{
+  "answer_summary": "your (possibly revised) answer",
+  "confidence": 0.0-1.0,
+  "confidence_rationale": "one sentence",
+  "key_claims": [{"text": "...", "verifiable": true|false, "source": null, "verified": false}],
+  "uncertainties": ["..."],
+  "changed": true|false
+}
+where "changed" is true iff you altered your answer from your previous opinion."""
+
+
+def _revision_prompt(
+    prompt: str,
+    opinion: AgentOpinion,
+    own_critiques: list[CouncilCritique],
+    peers: list[AgentOpinion],
+) -> str:
+    prior = opinion.answer_summary or opinion.content or "(no prior answer recorded)"
+    critique_lines = []
+    for c in own_critiques:
+        notes = [*c.weaknesses, *c.corrective_additions]
+        if notes:
+            critique_lines.append(f"- accuracy={c.factual_accuracy_score}, logic={c.logical_validity_score}: "
+                                  + "; ".join(notes))
+    critique_block = "\n".join(critique_lines) or "No substantive critiques of your opinion."
+    peer_block = "\n".join(
+        f"- Peer {chr(65 + i)}: {p.answer_summary or p.content[:400]}"
+        for i, p in enumerate(peers)
+    ) or "No peer opinions available."
+    return f"""Original query:
+{prompt}
+
+Your previous opinion:
+{prior}
+
+Critiques of your opinion:
+{critique_block}
+
+Anonymized peer opinions:
+{peer_block}
+"""
+
+
+def _norm_answer(opinion: AgentOpinion | None) -> str:
+    if opinion is None:
+        return ""
+    text = opinion.answer_summary or opinion.content or ""
+    return " ".join(text.lower().split())
 
 
 # ---------------------------------------------------------------------------

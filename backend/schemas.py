@@ -19,6 +19,9 @@ class ModelRoute(BaseModel):
     enabled: bool = True
     supports_streaming: bool = False
     missing_key: bool = False
+    # Optional per-route endpoint override for OpenAI-compatible servers
+    # (Ollama / LM Studio / vLLM). When set, the route works without an API key.
+    base_url: str | None = None
     # Optional generation controls. None → the provider's own default is used
     # (behavior preserved for existing routes). Set temperature=0 for reproducible eval runs.
     temperature: float | None = None
@@ -189,6 +192,10 @@ class AgentOpinion(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
     tool_results: list[ToolResult] = Field(default_factory=list)
     structured_output_parsed: bool = False
+    # Debate (Stage 2.5): 0 = original first opinion; >0 = revised in that debate round.
+    # `changed` is the model's self-report of whether it altered its answer this round.
+    revision_round: int = 0
+    changed: bool | None = None
     error: str | None = None
     latency_ms: int | None = None
     usage: UsageMetadata | None = None
@@ -317,6 +324,9 @@ class CouncilRun(BaseModel):
     orchestration_plan: OrchestrationPlan
     agent_opinions: list[AgentOpinion]
     council_critiques: list[CouncilCritique]
+    # Full debate transparency: each inner list is the opinions after one revision round.
+    # Empty when debate is disabled or converged before any revision.
+    debate_rounds: list[list[AgentOpinion]] = Field(default_factory=list)
     leader_election: LeaderElection | None = None
     synthesis: CouncilSynthesis | None = None
     validation: SynthesisValidation | None = None

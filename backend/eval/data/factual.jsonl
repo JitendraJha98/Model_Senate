@@ -1,0 +1,5 @@
+{"id": "factual-1", "suite": "factual", "question": "What is the chemical symbol for gold? Answer with the symbol only.", "gold": "Au", "metadata": {"source": "curated", "metric": "exact_match"}}
+{"id": "factual-2", "suite": "factual", "question": "In what year did the first humans land on the Moon?", "gold": "1969", "metadata": {"source": "curated", "metric": "exact_match"}}
+{"id": "factual-3", "suite": "factual", "question": "What is the capital city of Japan?", "gold": "Tokyo", "metadata": {"source": "curated", "metric": "exact_match"}}
+{"id": "factual-4", "suite": "factual", "question": "How many continents are there on Earth?", "gold": "7", "metadata": {"source": "curated", "metric": "exact_match"}}
+{"id": "factual-5", "suite": "factual", "question": "What is the largest planet in our solar system?", "gold": "Jupiter", "metadata": {"source": "curated", "metric": "exact_match"}}

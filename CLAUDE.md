@@ -12,6 +12,21 @@ uv run pytest                    # Run all tests
 uv run pytest tests/test_senate.py::test_name  # Run a single test
 ```
 
+Note: if `pytest` is blocked by local App Control policy, invoke it as a module:
+`uv run python -m pytest`.
+
+### Evaluation Harness (`backend/eval/`)
+```bash
+# Prove Council ≥ best single model, with accuracy / ECE / cost / latency + ablations.
+uv run python -m backend.eval.run \
+  --suite factual,math,code \
+  --configs single:openrouter-gpt-5-2,self_consistency:openrouter-gpt-5-2:5,senate,council \
+  --limit 20 --out eval_results/
+```
+Writes `eval_results/leaderboard.{md,json}` and `backend/eval/calibration.json`. Fixtures
+in `backend/eval/data/*.jsonl` are committed for offline, deterministic runs; CI drives the
+harness with fake adapters (no network) via `tests/test_eval_harness.py`.
+
 ### Frontend (TypeScript/React)
 Run these from the `frontend/` directory (that's where `package.json` lives).
 ```bash
@@ -48,6 +63,7 @@ The newer pipeline. The leader is elected dynamically based on scored performanc
 0. **Stage 0 — Orchestration:** `orchestrator.py` calls a designated orchestrator model (or falls back to heuristics) to classify the query type (`factual`, `analytical`, `code`, `ethics`, `creative`, `multi_part`) and assign each model a role from `backend/roles.py` (e.g. Fact Verifier, Devil's Advocate, Code Verifier). Tool assignments are derived from roles.
 1. **Stage 1 — First Opinions:** Models respond in their assigned roles. Each response is parsed into a structured JSON opinion (`answer`, `confidence`, `key_claims`, `assumptions`, `uncertainties`). Parse failures fall back to raw content with `status="parse_failed"`. When tools are assigned, Stage 1 runs an agentic loop (`CouncilService._run_opinion_with_tools`): tool calls embedded in model output (`TOOL_CALL: <name>: <input>`) are executed via `backend/tools.py` and the results are fed back to the model on the next turn (capped by `COUNCIL_MAX_TOOL_ITERATIONS`) so they inform the final answer.
 2. **Stage 2 — Critique:** Every successful model critiques every other model's opinion, producing `CritiqueScore` (accuracy/logic/completeness/calibration). Critique roles rotate across `CritiqueRole` variants.
+2.5. **Stage 2.5 — Multi-round Debate (`_stage_debate`):** Each model revises its own opinion given the critiques of it plus anonymized peers, self-reporting a `changed` flag. Loops up to `council_debate_max_rounds` (default 2), re-critiquing between rounds when `council_debate_recritique`, stopping early on convergence (`self_report` = all `changed=false`, or `answer_stable`). Election/synthesis then run on the FINAL opinions; every round is retained in `CouncilRun.debate_rounds` for transparency. Enabled by `council_debate_enabled`; the eval harness flips debate/critique/election off per-run for ablations via `CouncilService` constructor kwargs.
 3. **Stage 3 — Leader Election:** `backend/election.py` scores each candidate as `score = (rank_score × w_rank) + (calibration_score × w_cal) + (tool_verification_ratio × w_tool)`. Base weights are `(0.40, 0.30, 0.30)`; when no candidate produced verifiable claims the tool dimension is inactive and its weight is redistributed across rank and calibration. A cleanly-parsed opinion outranks a `parse_failed` one for leadership. Elects a leader and a backup validator.
 4. **Stage 4 — Synthesis:** The elected leader synthesizes all opinions and critiques into structured JSON (`direct_answer`, `consensus`, `dissent`, `unresolved`, `confidence_grade`, `provenance`). Retries with the validator model if synthesis fails.
 5. **Stage 5 — Validation:** The validator model checks the synthesis against the original query and critique flags, returning `approved`, `approved_with_caveats`, or `flagged`.
@@ -77,7 +93,9 @@ Abstract base `ProviderAdapter` with a single async `complete()` method. Concret
 | `election.py` | `elect_leader()` — scores candidates, returns `LeaderElection` |
 | `validator.py` | `build_validation_prompt()` / `parse_validation_result()` for Stage 5 |
 | `reintegrator.py` | `detect_contradictions()` / re-integration prompt + parsing for Stage 6 (multi-part) |
-| `tools.py` | `CalculatorTool`, `CodeExecutorTool`, `WebSearchTool`; `inject_tool_results()` |
+| `tools.py` | `CalculatorTool`, `CodeExecutorTool`, `WebSearchTool`; `inject_tool_results()`; `build_tool_registry()` (with `force_web_search`/`force_code_executor` overrides for harness/verifier) |
+| `pricing.py` | `PRICE_TABLE` + `estimate_cost()` — per-model USD cost estimate so every provider reports cost, not just OpenRouter |
+| `eval/` | Evaluation harness package: `datasets.py` (`EvalItem`, `load_suite`), `scorers.py` (exact/math/code/llm-judge), `metrics.py` (accuracy/win-rate/ECE/calibration), `baselines.py` (`run_config` for single/self-consistency/senate/council + ablations), `harness.py` (`run_eval`→`EvalReport`), `report.py` (leaderboard md/json), `run.py` (CLI); `data/*.jsonl` committed fixtures |
 | `streaming.py` | `CouncilEventStream` (asyncio queue) and `active_streams` registry |
 | `storage.py` | `ConversationStore` reads/writes JSON under `data/conversations/` |
 | `providers.py` | Provider adapter implementations |
@@ -112,10 +130,20 @@ Copy `.env.example` to `.env` and populate API keys. OpenRouter is the primary p
 | `COUNCIL_MIN_MODELS` | `2` | Minimum models required for a Council run |
 | `COUNCIL_SYNTHESIS_RETRY_ON_FAILURE` | `true` | Retry synthesis with validator if leader fails |
 | `COUNCIL_MAX_TOOL_ITERATIONS` | `3` | Max model turns per opinion when tools are used (results fed back each turn) |
+| `COUNCIL_DEBATE_ENABLED` | `true` | Run the Stage 2.5 multi-round debate/revision loop |
+| `COUNCIL_DEBATE_MAX_ROUNDS` | `2` | Max debate rounds before forced stop |
+| `COUNCIL_DEBATE_RECRITIQUE` | `true` | Re-critique revised opinions between debate rounds |
+| `COUNCIL_DEBATE_CONVERGENCE` | `self_report` | Early-stop rule: `self_report` (all `changed=false`) or `answer_stable` |
 | `TOOL_CODE_EXECUTOR_ENABLED` | `false` | Enable sandboxed Python code execution tool |
 | `TOOL_WEB_SEARCH_ENABLED` | `false` | Enable web search tool (Tavily/Serper/Brave providers in `backend/tools.py`) |
 
 Custom model routes can be injected via `MODEL_SENATE_ROUTES` as a JSON array of `ModelRoute` objects, overriding `DEFAULT_ROUTES` entirely.
+
+**Local models (Ollama / LM Studio / vLLM):** a `ModelRoute` may set `base_url` to an
+OpenAI-compatible endpoint. Such routes use `OpenAICompatibleAdapter` with the override,
+require **no API key** (Authorization header is omitted), and are never marked
+`missing_key`. See the commented Ollama preset in `.env.example` for a zero-key
+council-of-local-models setup.
 
 ### Pytest Configuration
 
