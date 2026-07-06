@@ -128,6 +128,7 @@ Copy `.env.example` to `.env` and populate API keys. OpenRouter is the primary p
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
+| `API_AUTH_TOKEN` | _(unset)_ | When set, paid endpoints require `Authorization: Bearer <token>`; unset = open API |
 | `ORCHESTRATOR_MODEL_ID` | `openrouter-gpt-5-2` | Model used for Council Stage 0 |
 | `COUNCIL_MIN_MODELS` | `2` | Minimum models required for a Council run |
 | `COUNCIL_SYNTHESIS_RETRY_ON_FAILURE` | `true` | Retry synthesis with validator if leader fails |

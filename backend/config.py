@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     google_api_key: str | None = None
     xai_api_key: str | None = None
     groq_api_key: str | None = None
+    api_auth_token: str | None = None  # when set, paid endpoints require Bearer <token>
     frontend_origin: str = "http://localhost:5173"
     model_senate_host: str = "127.0.0.1"
     model_senate_port: int = 8001

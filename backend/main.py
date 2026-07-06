@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 from uuid import uuid4
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -61,6 +62,20 @@ app.add_middleware(
 )
 
 
+def require_auth(authorization: str | None = Header(default=None)) -> None:
+    """Gate paid endpoints behind an optional bearer token.
+
+    When API_AUTH_TOKEN is unset the API is open (current behavior); when set, the
+    run-triggering endpoints require `Authorization: Bearer <token>`.
+    """
+    token = settings.api_auth_token
+    if not token:
+        return
+    expected = f"Bearer {token}"
+    if not authorization or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
+
+
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -81,7 +96,7 @@ async def get_config() -> AppConfigResponse:
     )
 
 
-@app.post("/api/senate/run", response_model=SenateRun)
+@app.post("/api/senate/run", response_model=SenateRun, dependencies=[Depends(require_auth)])
 async def run_senate(request: SenateRequest) -> SenateRun:
     try:
         return await service.run(request)
@@ -89,7 +104,7 @@ async def run_senate(request: SenateRequest) -> SenateRun:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/council/run")
+@app.post("/api/council/run", dependencies=[Depends(require_auth)])
 async def run_council(request: CouncilRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
     if len(request.selected_model_ids) < settings.council_min_models:
         raise HTTPException(status_code=400, detail=f"Select at least {settings.council_min_models} models")
@@ -146,8 +161,8 @@ async def get_conversation(run_id: str) -> SenateRun:
     return run
 
 
-@app.post("/v1/chat/completions")
-@app.post("/api/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(require_auth)])
+@app.post("/api/v1/chat/completions", dependencies=[Depends(require_auth)])
 async def openai_chat_completions(request: OAIChatRequest):
     """OpenAI-compatible endpoint: run the Council, return the synthesis as a completion."""
     prompt, system_context = messages_to_prompt(request.messages)
