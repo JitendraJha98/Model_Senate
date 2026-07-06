@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from backend.calibration import calibrated_probability
 from backend.election import elect_leader
 from backend.orchestrator import classify_query, fallback_plan
 from backend.providers import ProviderAdapter
@@ -260,6 +261,7 @@ class CouncilService:
 
         provenance = self._build_provenance_tree(synthesis, successful, critiques)
         grade = synthesis.confidence_grade or self._compute_final_grade(synthesis, validation)
+        convergence_score, agreement_map = _compute_agreement(successful)
 
         errors = [
             item.error
@@ -289,6 +291,9 @@ class CouncilService:
             validation=validation,
             provenance_tree=provenance,
             confidence_grade=grade,
+            convergence_score=convergence_score,
+            agreement_map=agreement_map,
+            calibrated_confidence=calibrated_probability(grade),
             created_at=created_at,
             completed_at=completed_at,
             prompt=request.prompt,
@@ -1029,6 +1034,34 @@ def _norm_answer(opinion: AgentOpinion | None) -> str:
         return ""
     text = opinion.answer_summary or opinion.content or ""
     return " ".join(text.lower().split())
+
+
+def _compute_agreement(opinions: list[AgentOpinion]) -> tuple[float | None, dict[str, list[str]]]:
+    """Cluster final opinions by normalized answer.
+
+    Returns (convergence_score, agreement_map) where convergence_score is the fraction of
+    models in the largest agreement cluster (1.0 = unanimous), and agreement_map maps each
+    distinct answer to the models holding it. None when there are no usable opinions.
+    """
+    clusters: dict[str, list[str]] = {}
+    for o in opinions:
+        key = _norm_answer(o)
+        if key:
+            clusters.setdefault(key, []).append(o.model_id)
+    total = sum(len(ids) for ids in clusters.values())
+    if not total:
+        return None, {}
+    convergence = max(len(ids) for ids in clusters.values()) / total
+    # Key the map by each cluster's representative answer text (not the normalized form).
+    labelled: dict[str, list[str]] = {}
+    for o in opinions:
+        key = _norm_answer(o)
+        if key and key in clusters and o.model_id in clusters[key]:
+            label = (o.answer_summary or o.content or "").strip()[:200] or key
+            labelled.setdefault(label, [])
+            if o.model_id not in labelled[label]:
+                labelled[label].append(o.model_id)
+    return round(convergence, 3), labelled
 
 
 # ---------------------------------------------------------------------------

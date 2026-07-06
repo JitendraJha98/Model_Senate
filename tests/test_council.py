@@ -85,6 +85,11 @@ async def test_council_pipeline_saves_completed_run(tmp_path: Path):
     assert run.synthesis.consensus_points == ["agreement"]
     assert run.validation is not None
     assert run.validation.verdict == "approved"
+    # Disagreement-as-output: both models share the same answer → full convergence,
+    # a populated agreement map, and a measured-calibration probability.
+    assert run.convergence_score == 1.0
+    assert run.agreement_map
+    assert run.calibrated_confidence is not None
     assert (tmp_path / f"{run.id}.json").exists()
 
 

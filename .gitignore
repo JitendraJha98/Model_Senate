@@ -223,3 +223,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated eval artifacts (fitted per-deployment by the harness)
+eval_results/
+backend/eval/calibration.json

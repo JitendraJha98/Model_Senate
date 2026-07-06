@@ -334,6 +334,11 @@ class CouncilRun(BaseModel):
     sub_runs: list["CouncilRun"] = Field(default_factory=list)
     provenance_tree: dict[str, ProvenanceEntry] = Field(default_factory=dict)
     confidence_grade: Literal["A", "B", "C", "D", "F"] | None = None
+    # Disagreement-as-output (Perplexity's idea): how much the final opinions agree
+    # (0..1), which models cluster on which answer, and a measured-calibration probability.
+    convergence_score: float | None = None
+    agreement_map: dict[str, list[str]] = Field(default_factory=dict)
+    calibrated_confidence: float | None = None
     created_at: datetime
     completed_at: datetime
     prompt: str
