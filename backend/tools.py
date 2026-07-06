@@ -165,11 +165,22 @@ class WebSearchTool(Tool):
 ToolRegistry = dict[str, Tool]
 
 
-def build_tool_registry(settings: Any) -> ToolRegistry:
+def build_tool_registry(
+    settings: Any,
+    *,
+    force_web_search: bool = False,
+    force_code_executor: bool = False,
+) -> ToolRegistry:
+    """Build the enabled-tool registry.
+
+    The `force_*` overrides let the eval harness / verifier role enable a tool
+    for a single run (e.g. the code executor for HumanEval scoring) without
+    flipping the global user-facing default in settings.
+    """
     registry: ToolRegistry = {"calculator": CalculatorTool()}
-    if getattr(settings, "tool_code_executor_enabled", False):
+    if force_code_executor or getattr(settings, "tool_code_executor_enabled", False):
         registry["code_executor"] = CodeExecutorTool(getattr(settings, "tool_code_executor_timeout_seconds", 10))
-    if getattr(settings, "tool_web_search_enabled", False):
+    if force_web_search or getattr(settings, "tool_web_search_enabled", False):
         provider = getattr(settings, "tool_web_search_provider", "tavily")
         key = {
             "tavily": getattr(settings, "tavily_api_key", None),
